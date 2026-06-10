@@ -1,0 +1,36 @@
+[build-system]
+requires = ["scikit-build-core>=0.8"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "commux"
+version = "0.1.0"
+description = "UCX tag-matching (MPI-style tags) c10d backend for torch.distributed, on CPU and CUDA"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Zoey Hu" }]
+keywords = ["pytorch", "torch.distributed", "ucx", "gdrcopy", "c10d", "tags", "halo-exchange"]
+classifiers = [
+  "Programming Language :: C++",
+  "Programming Language :: Python :: 3",
+  "Topic :: System :: Distributed Computing",
+]
+dependencies = ["torch"]
+
+[project.urls]
+Homepage = "https://github.com/zoeyzyhu/commux"
+
+# Torch must be importable at build time (find_package(Torch) reads it). Build
+# with the active environment's torch:  pip install . --no-build-isolation
+[tool.scikit-build]
+cmake.version = ">=3.18"
+cmake.build-type = "Release"
+wheel.packages = ["python/commux"]
+
+[tool.scikit-build.cmake.define]
+COMMUX_BUILD_PYTHON = "ON"
+# Override on the command line as needed, e.g.
+#   pip install . --no-build-isolation \
+#     -C cmake.define.COMMUX_UCX_PROVIDER=bundled
+COMMUX_UCX_PROVIDER = "auto"

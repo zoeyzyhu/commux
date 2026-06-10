@@ -1,0 +1,26 @@
+# build artifacts
+build/
+build*/
+_skbuild/
+dist/
+wheelhouse/
+*.egg-info/
+*.so
+*.o
+*.a
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# cmake
+CMakeCache.txt
+CMakeFiles/
+.cache/
+
+# editor / os
+.DS_Store
+*.swp
+compile_commands.json
