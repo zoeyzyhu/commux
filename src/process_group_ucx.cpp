@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <stdexcept>
+#include <thread>
 
 #include <ATen/ATen.h>
 #include <c10/util/Exception.h>
@@ -100,7 +101,8 @@ class UCXWork : public c10d::Work {
 
   bool isCompleted() override {
     std::lock_guard<std::mutex> lock(*mu_);
-    return poll_locked();
+    ucp_worker_progress(worker_);
+    return reap_locked();
   }
 
   bool isSuccess() const override { return !err_; }
@@ -113,8 +115,21 @@ class UCXWork : public c10d::Work {
 
   bool wait(std::chrono::milliseconds /*timeout*/ = kNoTimeout) override {
     std::unique_lock<std::mutex> lock(*mu_);
-    while (!poll_locked()) {
-      ucp_worker_progress(worker_);
+    // Event-driven wait: reap finished requests, drain any further ready
+    // completions, then block on the worker's wakeup fd until the next event
+    // instead of busy-spinning ucp_worker_progress() and burning a CPU core.
+    // worker_mu_ is held across ucp_worker_wait(): the worker is driven by a
+    // single thread per rank (UCS_THREAD_MODE_SERIALIZED) and progressing it
+    // here also advances every other in-flight Work, so sequential wait() calls
+    // cannot deadlock.
+    while (!reap_locked()) {
+      if (ucp_worker_progress(worker_)) continue;  // advanced; re-check
+      if (ucp_worker_wait(worker_) != UCS_OK) {
+        // Wakeup unavailable in this UCX config: yield rather than hard-spin.
+        lock.unlock();
+        std::this_thread::yield();
+        lock.lock();
+      }
     }
     if (err_) {
       std::rethrow_exception(err_);
@@ -127,9 +142,10 @@ class UCXWork : public c10d::Work {
   void synchronize() override {}
 
  private:
-  // Requires *mu_ held. Advances the worker and reaps finished requests.
-  bool poll_locked() {
-    ucp_worker_progress(worker_);
+  // Requires *mu_ held. Reaps finished requests WITHOUT advancing the worker;
+  // callers drive ucp_worker_progress() themselves. Returns true once every
+  // request has completed.
+  bool reap_locked() {
     bool all_done = true;
     for (auto& r : reqs_) {
       if (r == nullptr) continue;
@@ -185,10 +201,10 @@ ProcessGroupUCX::~ProcessGroupUCX() {
     void* req = ucp_ep_close_nbx(ep, &p);
     if (UCS_PTR_IS_PTR(req)) {
       ucs_status_t st;
-      do {
-        ucp_worker_progress(worker_);
-        st = ucp_request_check_status(req);
-      } while (st == UCS_INPROGRESS);
+      while ((st = ucp_request_check_status(req)) == UCS_INPROGRESS) {
+        if (ucp_worker_progress(worker_)) continue;
+        if (ucp_worker_wait(worker_) != UCS_OK) std::this_thread::yield();
+      }
       ucp_request_free(req);
     }
   }
@@ -204,7 +220,11 @@ void ProcessGroupUCX::init_ucx() {
   ucp_params_t params;
   std::memset(&params, 0, sizeof(params));
   params.field_mask = UCP_PARAM_FIELD_FEATURES;
-  params.features = UCP_FEATURE_TAG;
+  // TAG: tag-matching p2p. WAKEUP: lets the wait paths sleep on the worker's
+  // event fd (ucp_worker_wait) instead of busy-spinning ucp_worker_progress().
+  // Every transport commux uses between distinct ranks (cuda_ipc, cuda_copy,
+  // sm, tcp, ib/rc) advertises UCT_IFACE_FLAG_EVENT_FD, so wakeups arrive.
+  params.features = UCP_FEATURE_TAG | UCP_FEATURE_WAKEUP;
 
   st = ucp_init(&params, config, &context_);
   ucp_config_release(config);
@@ -289,11 +309,13 @@ void* ProcessGroupUCX::post_recv(at::Tensor& t, int src, uint32_t user_tag,
 
 void ProcessGroupUCX::wait_request(void* req) {
   if (req == nullptr) return;
+  // Drive progress while events are ready; otherwise sleep on the worker's
+  // wakeup fd instead of busy-spinning. Caller holds worker_mu_.
   ucs_status_t st;
-  do {
-    ucp_worker_progress(worker_);
-    st = ucp_request_check_status(req);
-  } while (st == UCS_INPROGRESS);
+  while ((st = ucp_request_check_status(req)) == UCS_INPROGRESS) {
+    if (ucp_worker_progress(worker_)) continue;
+    if (ucp_worker_wait(worker_) != UCS_OK) std::this_thread::yield();
+  }
   ucp_request_free(req);
   TORCH_CHECK(st == UCS_OK, "commux request failed: ", ucs_status_string(st));
 }
@@ -358,7 +380,8 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupUCX::recvAnysource(
     ucp_tag_message_h msg = nullptr;
     while ((msg = ucp_tag_probe_nb(worker_, want, kTagMaskAnySource,
                                    /*remove=*/1, &info)) == nullptr) {
-      ucp_worker_progress(worker_);
+      if (ucp_worker_progress(worker_)) continue;
+      if (ucp_worker_wait(worker_) != UCS_OK) std::this_thread::yield();
     }
     source_rank = static_cast<int>(info.sender_tag >> 48);
 
