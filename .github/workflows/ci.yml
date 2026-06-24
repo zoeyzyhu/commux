@@ -1,0 +1,95 @@
+name: Continuous Integration
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.11"
+  BUILD_TYPE: Release
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install style checkers
+        run: pip install --user cpplint cppcheck clang-format==20.1.4
+
+      - name: Cache pre-commit
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pre-commit
+          key: ${{ runner.os }}-pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pre-commit-
+
+      - name: Run pre-commit
+        uses: pre-commit/action@v3.0.1
+
+  # commux is Linux-only (UCX does not build on macOS), so CI is Linux-only.
+  # CI uses the system UCX (apt) to skip the ~20-min source build; the release
+  # workflow bundles UCX from source for self-contained wheels.
+  build-and-test:
+    needs: pre-commit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history for setuptools-scm version
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+
+      - name: Install system UCX (fast path; release bundles it instead)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libucx-dev pkg-config
+
+      - name: Install Python dependencies
+        run: |
+          pip install build ninja setuptools-scm wheel numpy patchelf
+          pip install 'torch==2.10.0' --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Configure CMake (C++ tests)
+        run: |
+          cmake -B ${{ github.workspace }}/build \
+                -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+                -DCOMMUX_UCX_PROVIDER=system \
+                -DCOMMUX_CUDA=OFF \
+                -DCOMMUX_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build ${{ github.workspace }}/build --config ${{ env.BUILD_TYPE }} --parallel 4
+
+      - name: Install the project (python module)
+        run: |
+          pip install --no-build-isolation --no-deps \
+            -C cmake.define.COMMUX_UCX_PROVIDER=system \
+            -C cmake.define.COMMUX_CUDA=OFF .
+
+      - name: Smoke import + end-to-end backend test (CPU, 2 ranks)
+        run: |
+          python -c "import commux; commux.register(); print('commux import OK')"
+          torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/test_torch_dist.py
+
+      - name: C++ test (2 ranks over TCPStore)
+        run: |
+          ./build/test_commux 1 2 127.0.0.1 29555 &
+          ./build/test_commux 0 2 127.0.0.1 29555
+          wait

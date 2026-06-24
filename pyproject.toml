@@ -1,10 +1,14 @@
 [build-system]
-requires = ["scikit-build-core>=0.8", "patchelf; platform_system == 'Linux'"]
+requires = [
+  "scikit-build-core>=0.8",
+  "setuptools-scm>=8",
+  "patchelf; platform_system == 'Linux'",
+]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "commux"
-version = "0.1.0"
+dynamic = ["version"]
 description = "UCX tag-matching (MPI-style tags) c10d backend for torch.distributed, on CPU and CUDA"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -15,6 +19,8 @@ classifiers = [
   "Programming Language :: C++",
   "Programming Language :: Python :: 3",
   "Topic :: System :: Distributed Computing",
+  # UCX builds only on Linux, so commux is a Linux-only package.
+  "Operating System :: POSIX :: Linux",
 ]
 dependencies = ["torch"]
 
@@ -27,6 +33,8 @@ Homepage = "https://github.com/zoeyzyhu/commux"
 cmake.version = ">=3.18"
 cmake.build-type = "Release"
 wheel.packages = ["python/commux"]
+# Version comes from git tags (setuptools-scm), matching the auto-tag CD flow.
+metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
 
 [tool.scikit-build.cmake.define]
 COMMUX_BUILD_PYTHON = "ON"
@@ -34,3 +42,6 @@ COMMUX_BUILD_PYTHON = "ON"
 #   pip install . --no-build-isolation \
 #     -C cmake.define.COMMUX_UCX_PROVIDER=bundled
 COMMUX_UCX_PROVIDER = "auto"
+
+[tool.setuptools_scm]
+fallback_version = "0.1.0"
