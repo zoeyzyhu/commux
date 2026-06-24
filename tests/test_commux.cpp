@@ -134,6 +134,98 @@ int main(int argc, char** argv) {
   }
 
   pg->barrier()->wait();
+
+  // --- Test 4: coalesced multi-tensor vector p2p (IOV path) ----------------
+  // One send()/recv() call carrying V=3 differently-shaped tensors. With
+  // COMMUX_COALESCE unset/1 this drives the IOV single-message path; with
+  // COMMUX_COALESCE=0 the per-tensor fallback. Both must deliver identical data.
+  if (size >= 2) {
+    const int TAG_V = 300;
+    const std::vector<int64_t> shapes{5, 1, 8};
+    if (rank == 0) {
+      std::vector<at::Tensor> v;
+      for (size_t k = 0; k < shapes.size(); ++k)
+        v.push_back(torch::full({shapes[k]}, static_cast<double>(10 + k), f64));
+      pg->send(v, /*dst=*/1, TAG_V)->wait();
+    } else if (rank == 1) {
+      std::vector<at::Tensor> v;
+      for (size_t k = 0; k < shapes.size(); ++k)
+        v.push_back(torch::zeros({shapes[k]}, f64));
+      pg->recv(v, /*src=*/0, TAG_V)->wait();
+      bool ok = true;
+      for (size_t k = 0; k < shapes.size(); ++k)
+        ok = ok && v[k].eq(static_cast<double>(10 + k)).all().item<bool>();
+      check(ok, "coalesced multi-tensor vector p2p delivers all V buffers");
+    }
+  }
+
+  // --- Test 5: coalescing group window (COMMUX_GROUP=1) --------------------
+  // Mirrors a halo step: defer a recv + a send inside startCoalescing/
+  // endCoalescing, then wait the single aggregate Work.
+  const char* group_env = std::getenv("COMMUX_GROUP");
+  bool group_on =
+      group_env && (std::string(group_env) == "1" || std::string(group_env) == "on");
+  if (group_on && size >= 2 && (rank == 0 || rank == 1)) {
+    const int TG_A = 410, TG_B = 420;
+    int peer = rank == 0 ? 1 : 0;
+    auto out = torch::zeros({4}, f64);
+    auto mine = torch::full({4}, static_cast<double>(rank + 1), f64);
+    std::vector<at::Tensor> rv{out}, sv{mine};
+    pg->startCoalescing();
+    if (rank == 0) {
+      pg->recv(rv, peer, TG_B);
+      pg->send(sv, peer, TG_A);
+    } else {
+      pg->recv(rv, peer, TG_A);
+      pg->send(sv, peer, TG_B);
+    }
+    auto w = pg->endCoalescing();
+    if (w) w->wait();
+    check(out.eq(static_cast<double>(peer + 1)).all().item<bool>(),
+          "coalescing group window: deferred recv/send completed");
+  }
+
+  pg->barrier()->wait();
+
+  // --- Optional micro-benchmark (COMMUX_BENCH=1): round-trip latency of a
+  // V-tensor vector ping-pong. Isolates message coalescing: the single stream-
+  // sync applies to both paths, so COMMUX_COALESCE toggles only #messages
+  // (1 vs V). COMMUX_BENCH_V sets V (default 16). -----------------------------
+  if (std::getenv("COMMUX_BENCH") && size >= 2) {
+    const int V = std::getenv("COMMUX_BENCH_V")
+                      ? std::atoi(std::getenv("COMMUX_BENCH_V")) : 16;
+    const int ITERS = 2000;
+    const int64_t N = 1024;
+    std::vector<at::Tensor> sv, rv;
+    for (int k = 0; k < V; ++k) {
+      sv.push_back(torch::full({N}, static_cast<double>(k), f64));
+      rv.push_back(torch::zeros({N}, f64));
+    }
+    const int TAG = 900;
+    pg->barrier()->wait();
+    auto t0 = std::chrono::steady_clock::now();
+    for (int it = 0; it < ITERS; ++it) {
+      if (rank == 0) {
+        pg->send(sv, 1, TAG)->wait();
+        pg->recv(rv, 1, TAG + 1)->wait();
+      } else if (rank == 1) {
+        pg->recv(rv, 0, TAG)->wait();
+        pg->send(sv, 0, TAG + 1)->wait();
+      }
+    }
+    auto t1 = std::chrono::steady_clock::now();
+    if (rank == 0) {
+      double us =
+          std::chrono::duration<double, std::micro>(t1 - t0).count() / ITERS;
+      const char* c = std::getenv("COMMUX_COALESCE");
+      std::printf("[bench] V=%d iters=%d round-trip=%.2f us/iter "
+                  "(COMMUX_COALESCE=%s)\n",
+                  V, ITERS, us, c ? c : "default");
+    }
+    pg->barrier()->wait();
+  }
+
+  pg->barrier()->wait();
   if (rank == 0) {
     std::printf(g_failures == 0 ? "\nALL TESTS PASSED\n"
                                 : "\n%d TEST(S) FAILED\n",

@@ -78,6 +78,11 @@ UCXPG_DEVICE=cuda ./build/test_commux 0 2 127.0.0.1 29592 & \
 UCXPG_DEVICE=cuda ./build/test_commux 1 2 127.0.0.1 29592 & wait              # CUDA
 ```
 
+> `test_commux` also covers the coalescing features: it exercises the IOV path
+> under `COMMUX_COALESCE=1` and the coalescing window under `COMMUX_GROUP=1`. Set
+> `COMMUX_BENCH=1 COMMUX_BENCH_V=<N>` for a `V`-tensor ping-pong latency
+> benchmark (compare `COMMUX_COALESCE=0` vs `1`).
+
 ## CMake options
 
 | option | default | meaning |
@@ -92,12 +97,46 @@ UCXPG_DEVICE=cuda ./build/test_commux 1 2 127.0.0.1 29592 & wait              # 
 `scripts/build_ucx.sh [PREFIX] [UCX_VER] [GDR_VER]` builds UCX+gdrcopy once with
 the same flags, for pointing `UCX_ROOT` at.
 
+## Runtime tuning (environment variables)
+
+Read once at process start; opt-in and **off by default**, so default behavior is
+unchanged.
+
+| variable | default | meaning |
+|----------|---------|---------|
+| `COMMUX_COALESCE` | off | Merge a multi-tensor `send()`/`recv()` vector (`tensors.size() > 1`, all on one memory type) into **one** UCX message via the IOV datatype — one rendezvous / tag-match / stream-sync instead of `V`. **Changes the wire format**, so every rank must set it the same way. `1`/`on` to enable. |
+| `COMMUX_GROUP` | off | Enable the coalescing window — the c10d `startCoalescing`/`endCoalescing` hooks, i.e. the analog of `ncclGroupStart`/`ncclGroupEnd`. Between the markers, `send`/`recv` defer their posts and are flushed together with a single stream-sync at `endCoalescing`. Wire-compatible with a non-grouping peer. `1`/`on` to enable. |
+
+**Always on (no flag):** wait paths are **event-driven** — a `Work::wait()`
+sleeps on the worker's wakeup fd (`UCP_FEATURE_WAKEUP` + `ucp_worker_wait`)
+instead of busy-spinning `ucp_worker_progress`, so a rank blocked on a transfer
+no longer pins a CPU core. Falls back to a yielding poll if the active transports
+expose no wakeup fd.
+
+### When do these help?
+
+- **`COMMUX_COALESCE` (IOV packing)** cuts per-message overhead, so it helps most
+  when one `send`/`recv` carries **many** buffers over a **latency-bound /
+  high-latency link (InfiniBand)**. Caveat: UCX's IOV path is **not zero-copy for
+  CUDA** (it gathers into a staging buffer), so for large vectors on intra-node
+  `cuda_ipc` it can be *slower* than separate messages. Measured intra-node:
+  faster at `V≈2`, slower at `V≈16` — benchmark before enabling.
+- **`COMMUX_GROUP` (op-batching)** collapses an exchange's many per-tensor posts
+  into one stream-sync + one aggregate `Work`. Because the posts are already
+  issued concurrently, the intra-node win is small; it is most useful on
+  multi-node **InfiniBand**, where it reduces handshakes. Exposed through the
+  standard c10d coalescing API, so a C++ consumer just calls
+  `pg->startCoalescing(dev)` / `pg->endCoalescing(dev)->wait()` around its posts.
+  The two flags compose: group the window, and IOV-pack any multi-tensor op in it.
+
 ## Design
 
 64-bit `ucp_tag` = `[63:48] senderRank | [47:33] sub-index | [32] collective-bit
 | [31:0] userTag`, so receivers match exactly on `(sender, tag)`; `recvAnysource`
 wildcards the rank field. Endpoints bootstrap by exchanging worker addresses
 through the `c10d::Store`. `send`/`recv` are non-blocking and return a `Work`
-that drives `ucp_worker_progress`; collectives run over tagged p2p with
+whose `wait()` is event-driven — it sleeps on the worker's wakeup fd rather than
+busy-spinning `ucp_worker_progress`; collectives run over tagged p2p with
 `at::add/minimum/maximum` so the same code reduces CPU and CUDA tensors. CUDA
-buffers are stream-synchronized before UCX touches them.
+buffers are stream-synchronized before UCX touches them. Optional
+message/operation coalescing is available at runtime — see **Runtime tuning**.

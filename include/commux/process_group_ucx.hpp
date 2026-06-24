@@ -72,6 +72,15 @@ class ProcessGroupUCX : public c10d::Backend {
   c10::intrusive_ptr<c10d::Work> barrier(
       const c10d::BarrierOptions& opts = c10d::BarrierOptions()) override;
 
+  // --- coalescing (group) window: the c10d analog of ncclGroupStart/End -----
+  // Between startCoalescing() and endCoalescing(), send()/recv() defer their
+  // posts and are issued together at endCoalescing() with a single stream-sync.
+  // Enabled by COMMUX_GROUP=1; otherwise startCoalescing() is a no-op and posts
+  // happen immediately (default, behavior-preserving).
+  bool supportsCoalescing() const override { return true; }
+  void startCoalescing() override;
+  c10::intrusive_ptr<c10d::Work> endCoalescing() override;
+
  private:
   void init_ucx();
   void bootstrap_endpoints();
@@ -104,6 +113,21 @@ class ProcessGroupUCX : public c10d::Backend {
 
   // Serializes all access to the single ucp worker (post + progress + wait).
   std::mutex worker_mu_;
+
+  // Coalescing (group) state. While a window is open (COMMUX_GROUP=1), send()/
+  // recv() append to deferred_ and return the shared pending_ Work; endCoalescing
+  // flushes deferred_ as one batch (one stream-sync). Posts use the same
+  // per-tensor tags as the non-grouped path, so the wire format is unchanged --
+  // a grouping rank interoperates with a non-grouping peer.
+  struct DeferredOp {
+    bool is_send;
+    std::vector<at::Tensor> keep;  // buffers held alive until the flush completes
+    int peer;
+    uint32_t tag;
+  };
+  bool coalescing_ = false;
+  std::vector<DeferredOp> deferred_;
+  c10::intrusive_ptr<c10d::Work> pending_;
 };
 
 }  // namespace commux
