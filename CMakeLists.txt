@@ -153,12 +153,53 @@ if(COMMUX_BUILD_PYTHON)
     BUILD_RPATH "$ORIGIN/lib:${UCX_LIBRARY_DIR}"
     INSTALL_RPATH "$ORIGIN/lib:$ORIGIN:${UCX_LIBRARY_DIR}")
 
-  # Install layout for the wheel: commux/_C.so + commux/lib/libcommux.so
-  # (+ bundled UCX libs when applicable).
+  # Self-contained wheel layout -- a C++ consumer (e.g. snapy) needs no separate
+  # UCX install:
+  #   commux/_C.so                           python extension
+  #   commux/lib/libcommux.so                C++ backend
+  #   commux/lib/libuc*.so*  libgdrapi*      vendored UCX + gdrcopy runtime libs
+  #   commux/include/commux/*.hpp            commux headers
+  #   commux/include/{ucp,ucs,uct,ucm}/*.h   vendored UCX headers
   install(TARGETS commux_pybind LIBRARY DESTINATION commux)
   install(TARGETS commux LIBRARY DESTINATION commux/lib)
-  if(_ucx_bundled)
-    install(DIRECTORY "${UCX_LIBRARY_DIR}/" DESTINATION commux/lib
-            FILES_MATCHING PATTERN "libuc*.so*")
+  install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/"
+          DESTINATION commux/include
+          FILES_MATCHING PATTERN "*.hpp")
+  # Vendor UCX (libuc*) + gdrcopy (libgdrapi) next to libcommux so its $ORIGIN
+  # rpath resolves them, plus the UCX C headers so a consumer's
+  # <ucp/api/ucp.h> resolves -- whether UCX was bundled or taken from UCX_ROOT.
+  install(DIRECTORY "${UCX_LIBRARY_DIR}/" DESTINATION commux/lib
+          FILES_MATCHING PATTERN "libuc*.so*" PATTERN "libgdrapi*.so*")
+  foreach(_ucx_hdr ucp ucs uct ucm)
+    if(EXISTS "${UCX_INCLUDE_DIR}/${_ucx_hdr}")
+      install(DIRECTORY "${UCX_INCLUDE_DIR}/${_ucx_hdr}"
+              DESTINATION commux/include FILES_MATCHING PATTERN "*.h")
+    endif()
+  endforeach()
+
+  # Relocatability: the vendored UCX libs bake in an absolute build-tree rpath
+  # that dangles once the wheel is installed elsewhere. Repoint each vendored
+  # lib's rpath at $ORIGIN (and the UCX transport modules in lib/ucx/ at
+  # $ORIGIN/..) so they resolve their siblings inside commux/lib regardless of
+  # install location. Requires patchelf (a build-time dependency).
+  find_program(PATCHELF_EXECUTABLE patchelf)
+  if(PATCHELF_EXECUTABLE)
+    install(CODE "
+      file(GLOB _vend \"\${CMAKE_INSTALL_PREFIX}/commux/lib/lib*.so*\")
+      foreach(_l \${_vend})
+        if(NOT IS_SYMLINK \"\${_l}\")
+          execute_process(COMMAND \"${PATCHELF_EXECUTABLE}\" --set-rpath \"\$ORIGIN\" \"\${_l}\" ERROR_QUIET)
+        endif()
+      endforeach()
+      file(GLOB _mods \"\${CMAKE_INSTALL_PREFIX}/commux/lib/ucx/*.so*\")
+      foreach(_m \${_mods})
+        if(NOT IS_SYMLINK \"\${_m}\")
+          execute_process(COMMAND \"${PATCHELF_EXECUTABLE}\" --set-rpath \"\$ORIGIN/..\" \"\${_m}\" ERROR_QUIET)
+        endif()
+      endforeach()
+    ")
+  else()
+    message(WARNING "patchelf not found: vendored UCX libs keep their build-tree "
+                    "rpath; the wheel may not be relocatable. 'pip install patchelf'.")
   endif()
 endif()
