@@ -2,16 +2,13 @@
 
 #include <ATen/ATen.h>
 #include <c10/util/Exception.h>
+#include <dlfcn.h>
 
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
 #include <thread>
-
-#ifdef COMMUX_WITH_CUDA
-#include <c10/cuda/CUDAStream.h>
-#endif
 
 namespace commux {
 
@@ -33,19 +30,54 @@ ucs_memory_type_t mem_type_of(const at::Tensor& t) {
   return t.is_cuda() ? UCS_MEMORY_TYPE_CUDA : UCS_MEMORY_TYPE_HOST;
 }
 
+// CUDA stream-sync is provided by the optional sibling libcommux_cuda.so -- the
+// only commux object that links libc10_cuda.so. We dlopen it lazily so that
+// libcommux.so itself has NO link-time dependency on libc10_cuda.so and thus
+// loads on a CPU-only torch (where that library does not exist). On a CUDA
+// torch the sibling and its libc10_cuda dependency are present, so the sync
+// runs.
+using commux_cuda_sync_fn = void (*)(int);
+
+commux_cuda_sync_fn resolve_cuda_sync() {
+  // Resolved once; nullptr means the shim is unavailable (CPU-only torch).
+  static commux_cuda_sync_fn fn = []() -> commux_cuda_sync_fn {
+    // Load the sibling sitting next to this very library (located via dladdr),
+    // so it resolves regardless of LD_LIBRARY_PATH or the consumer's rpath. Its
+    // own libc10_cuda.so dependency is satisfied from the already-loaded torch.
+    std::string path = "libcommux_cuda.so";
+    Dl_info info;
+    if (dladdr(reinterpret_cast<void*>(&resolve_cuda_sync), &info) &&
+        info.dli_fname != nullptr) {
+      std::string self(info.dli_fname);
+      auto slash = self.find_last_of('/');
+      if (slash != std::string::npos)
+        path = self.substr(0, slash + 1) + "libcommux_cuda.so";
+    }
+    void* h = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (h == nullptr)  // fall back to the bare soname (LD_LIBRARY_PATH search)
+      h = dlopen("libcommux_cuda.so", RTLD_NOW | RTLD_LOCAL);
+    if (h == nullptr) return nullptr;
+    return reinterpret_cast<commux_cuda_sync_fn>(
+        dlsym(h, "commux_cuda_sync_stream"));
+  }();
+  return fn;
+}
+
 // UCX moves CUDA memory on its own stream, unordered with respect to the torch
 // stream that produced/consumes the buffer. Block until the tensor's current
 // stream is idle before handing the buffer to UCX, so the producer kernel has
-// finished (send) / no stale kernel is mid-write (recv). nop for CPU tensors
-// and for builds without CUDA.
+// finished (send) / no stale kernel is mid-write (recv). nop for CPU tensors. A
+// CUDA tensor with no sync shim available is a hard error (skipping the sync
+// would be a silent data race), not a no-op.
 void sync_stream_if_cuda(const at::Tensor& t) {
-#ifdef COMMUX_WITH_CUDA
-  if (t.is_cuda()) {
-    c10::cuda::getCurrentCUDAStream(t.device().index()).synchronize();
-  }
-#else
-  (void)t;
-#endif
+  if (!t.is_cuda()) return;
+  commux_cuda_sync_fn fn = resolve_cuda_sync();
+  TORCH_CHECK(
+      fn != nullptr,
+      "commux: received a CUDA tensor but the CUDA stream-sync helper "
+      "(libcommux_cuda.so) could not be loaded -- this commux was built "
+      "without CUDA support, or libc10_cuda.so is unavailable.");
+  fn(static_cast<int>(t.device().index()));
 }
 
 // Halo exchange hands commux a whole vector of per-variable ghost tensors in
@@ -99,9 +131,8 @@ bool homogeneous_memtype(const std::vector<at::Tensor>& ts,
 // Synchronize the current CUDA stream of each distinct device in the batch once
 // (typically a single device for a halo exchange), so the producer/consumer
 // kernels are done before UCX -- which moves CUDA memory on its own stream --
-// touches the buffers. Replaces the previous per-tensor sync. nop without CUDA.
+// touches the buffers. Replaces the previous per-tensor sync. nop for CPU.
 void sync_batch_streams(const std::vector<at::Tensor>& ts) {
-#ifdef COMMUX_WITH_CUDA
   for (size_t i = 0; i < ts.size(); ++i) {
     if (!ts[i].is_cuda()) continue;
     auto dev = ts[i].device().index();
@@ -111,11 +142,8 @@ void sync_batch_streams(const std::vector<at::Tensor>& ts) {
         seen = true;
         break;
       }
-    if (!seen) c10::cuda::getCurrentCUDAStream(dev).synchronize();
+    if (!seen) sync_stream_if_cuda(ts[i]);  // first tensor on this device
   }
-#else
-  (void)ts;
-#endif
 }
 
 std::string addr_key(int rank) { return "commux/addr/" + std::to_string(rank); }
