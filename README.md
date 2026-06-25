@@ -61,12 +61,12 @@ Launch with `torchrun --nproc-per-node=N ...` as usual.
 > then wait). Blocking out-of-order send/recv deadlocks under the CUDA
 > rendezvous protocol, exactly as with real MPI.
 
-## Use from C++ (e.g. snapy)
+## Use from C++
 
 Because the wheel ships the C++ **library + headers** (and bundles UCX), a C++
 project can just **`pip install commux`** and link the installed package — no
 source build, no UCX of its own. Locate it from CMake by probing the Python
-package (this is what snapy's `FindCommux.cmake` does):
+package:
 
 ```cmake
 execute_process(
