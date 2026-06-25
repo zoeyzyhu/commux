@@ -110,7 +110,9 @@ class ProcessGroupUCX : public c10d::Backend {
   std::vector<ucp_ep_h>
       eps_;  // one endpoint per peer rank (eps_[rank_] unused)
 
-  // Serializes all access to the single ucp worker (post + progress + wait).
+  // Serializes commux-owned state (e.g. the coalescing window) and the posting
+  // of new requests. The UCX worker itself is created UCS_THREAD_MODE_MULTI, so
+  // Work::wait() progresses/blocks on it WITHOUT holding this mutex.
   std::mutex worker_mu_;
 
   // Coalescing (group) state. While a window is open (COMMUX_GROUP=1), send()/
