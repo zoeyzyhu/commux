@@ -63,7 +63,7 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install build ninja setuptools-scm wheel numpy patchelf
+          pip install scikit-build-core ninja cmake setuptools-scm wheel numpy patchelf
           pip install 'torch==2.10.0' --index-url https://download.pytorch.org/whl/cpu
 
       - name: Configure CMake (C++ tests)
