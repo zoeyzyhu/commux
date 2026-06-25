@@ -9,12 +9,12 @@ device tensors** (UCX `cuda_ipc` / `cuda_copy` / `gdr_copy`).
 
 Motivation: codes that drive stencil/halo exchange through tagged `c10d`
 send/recv (`pg.send(bufs, dst, tag)`) can't use NCCL for it — NCCL ignores tags
-and matches only by stream/communicator ordering. commux honors tags via UCX's
+and matches only by stream/communicator ordering. `commux` honors tags via UCX's
 `ucp_tag_send_nbx` / `ucp_tag_recv_nbx`.
 
 ## Install
 
-commux is **Linux-only** (it builds on UCX, which does not compile on macOS) and
+`commux` is **Linux-only** (it builds on UCX, which does not compile on macOS) and
 needs **UCX** — but you do **not** install UCX yourself: every wheel **vendors
 UCX (+ the gdrcopy userspace lib)**, so a `pip install` is self-contained.
 
@@ -37,7 +37,7 @@ pip install . --no-build-isolation -C cmake.define.COMMUX_UCX_PROVIDER=bundled
 The installed package under `site-packages/commux/` is fully self-contained:
 `_C.so` (the extension), `lib/libcommux.so` plus the vendored `lib/libuc*.so` /
 `libgdrapi.so` (relocatable — repointed to `$ORIGIN`), and `include/` with the
-commux **and** UCX C++ headers for downstream C++ consumers (see below).
+`commux` **and** UCX C++ headers for downstream C++ consumers (see below).
 
 > `gdr_copy` only engages at runtime when the `gdrdrv` kernel module is loaded
 > (`/dev/gdrdrv`) and an RDMA NIC is present; otherwise UCX uses
@@ -84,7 +84,7 @@ pg->setBackend(c10::DeviceType::CPU,  c10d::ProcessGroup::BackendType::CUSTOM, b
 pg->setBackend(c10::DeviceType::CUDA, c10d::ProcessGroup::BackendType::CUSTOM, backend);
 ```
 
-Prefer to build from source? commux also exports the CMake target
+Prefer to build from source? `commux` also exports the CMake target
 `commux::commux`, so FetchContent works too:
 
 ```cmake
