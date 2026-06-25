@@ -156,9 +156,11 @@ void apply_reduce(at::Tensor& acc, const at::Tensor& other, c10d::ReduceOp op) {
 }
 
 // c10d::Work wrapping a set of in-flight ucp requests. wait()/isCompleted()
-// drive the shared worker's progress engine (the classic "wait_req" loop),
-// serialized through the backend's worker mutex. Tensors are held to keep the
-// underlying buffers alive until the transfer finishes.
+// drive the shared worker's progress engine (the classic "wait_req" loop). The
+// worker is UCS_THREAD_MODE_MULTI (internally thread-safe), so waiting on one
+// Work does not hold the backend's worker mutex and does not block other local
+// threads from posting/progressing more nonblocking sends/recvs. Tensors are
+// held to keep the underlying buffers alive until the transfer finishes.
 class UCXWork : public c10d::Work {
  public:
   UCXWork(ucp_worker_h worker, std::mutex* mu, c10d::OpType opType,
@@ -173,9 +175,10 @@ class UCXWork : public c10d::Work {
         iov_(std::move(iov)) {}
 
   bool isCompleted() override {
-    std::lock_guard<std::mutex> lock(*mu_);
+    // The worker is thread-safe (MULTI), so progress + reap need no lock; each
+    // Work is reaped by the single thread that created it.
     ucp_worker_progress(worker_);
-    return reap_locked();
+    return reap();
   }
 
   bool isSuccess() const override { return !err_; }
@@ -187,22 +190,20 @@ class UCXWork : public c10d::Work {
   std::vector<at::Tensor> result() override { return tensors_; }
 
   bool wait(std::chrono::milliseconds /*timeout*/ = kNoTimeout) override {
-    std::unique_lock<std::mutex> lock(*mu_);
-    // Event-driven wait. The worker is UCS_THREAD_MODE_MULTI (internally
-    // thread-safe), so we advance/block on it WITHOUT holding *mu_: a thread
-    // parked here must not block other threads from posting and progressing the
-    // shared worker -- their progress is precisely what completes this Work.
-    // (Holding *mu_ across a blocking ucp_worker_wait() would serialize, and
-    // can deadlock, multi-threaded consumers such as snapy.) *mu_ guards only
-    // the per-Work request state reaped here.
-    while (!reap_locked()) {
-      lock.unlock();
-      if (!ucp_worker_progress(worker_)) {
-        // Idle: sleep on the worker's wakeup fd until the next event (no
-        // busy-spin), or yield if this UCX config exposes no wakeup fd.
-        if (ucp_worker_wait(worker_) != UCS_OK) std::this_thread::yield();
-      }
-      lock.lock();
+    // Event-driven wait: reap finished requests, drain ready completions, then
+    // block on the worker's wakeup fd until the next event instead of busy-
+    // spinning ucp_worker_progress() and burning a CPU core. The worker is
+    // UCS_THREAD_MODE_MULTI (internally thread-safe), so this path
+    // intentionally does NOT hold ProcessGroupUCX::worker_mu_: a thread parked
+    // here must not block other threads from posting and progressing the shared
+    // worker -- their progress is precisely what completes this Work. (Holding
+    // the mutex across a blocking ucp_worker_wait() would serialize, and can
+    // deadlock, multi-threaded consumers such as snapy.)
+    while (!reap()) {
+      if (ucp_worker_progress(worker_)) continue;  // advanced; re-check
+      // Idle: sleep on the worker's wakeup fd until the next event, or yield if
+      // this UCX config exposes no wakeup fd.
+      if (ucp_worker_wait(worker_) != UCS_OK) std::this_thread::yield();
     }
     if (err_) {
       std::rethrow_exception(err_);
@@ -222,10 +223,11 @@ class UCXWork : public c10d::Work {
   }
 
  private:
-  // Requires *mu_ held. Reaps finished requests WITHOUT advancing the worker;
-  // callers drive ucp_worker_progress() themselves. Returns true once every
-  // request has completed.
-  bool reap_locked() {
+  // Reaps finished requests WITHOUT advancing the worker; callers drive
+  // ucp_worker_progress() themselves. Returns true once every request has
+  // completed. Safe to call lock-free: the worker is MULTI and each Work is
+  // reaped by a single thread.
+  bool reap() {
     bool all_done = true;
     for (auto& r : reqs_) {
       if (r == nullptr) continue;
@@ -303,12 +305,19 @@ void ProcessGroupUCX::init_ucx() {
 
   ucp_params_t params;
   std::memset(&params, 0, sizeof(params));
-  params.field_mask = UCP_PARAM_FIELD_FEATURES;
+  params.field_mask =
+      UCP_PARAM_FIELD_FEATURES | UCP_PARAM_FIELD_MT_WORKERS_SHARED;
   // TAG: tag-matching p2p. WAKEUP: lets the wait paths sleep on the worker's
   // event fd (ucp_worker_wait) instead of busy-spinning ucp_worker_progress().
   // Every transport commux uses between distinct ranks (cuda_ipc, cuda_copy,
   // sm, tcp, ib/rc) advertises UCT_IFACE_FLAG_EVENT_FD, so wakeups arrive.
   params.features = UCP_FEATURE_TAG | UCP_FEATURE_WAKEUP;
+  // commux uses a single worker per rank, shared by multiple threads, so the
+  // context itself does not strictly need cross-worker thread safety (UCX
+  // docs). Set it anyway as belt-and-suspenders / future-proofing; the
+  // per-worker UCS_THREAD_MODE_MULTI below is what makes the shared worker
+  // thread-safe.
+  params.mt_workers_shared = 1;
 
   st = ucp_init(&params, config, &context_);
   ucp_config_release(config);
