@@ -112,13 +112,32 @@ target_include_directories(commux PUBLIC
   "${UCX_INCLUDE_DIR}")
 target_include_directories(commux SYSTEM PUBLIC ${TORCH_INCLUDE_DIRS})
 target_link_libraries(commux PUBLIC ${TORCH_LIBRARIES} ${UCX_LIBRARIES})
+# dlopen/dladdr the optional CUDA stream-sync shim at runtime (see below).
+target_link_libraries(commux PRIVATE ${CMAKE_DL_LIBS})
 if(_ucx_bundled)
   add_dependencies(commux commux_ucx_ext)
 endif()
+
+# ---------------------------------------------------------------------------
+# CUDA stream-sync shim (libcommux_cuda.so): the ONLY commux object that links
+# libc10_cuda.so. Kept OUT of libcommux.so so the main library has no link-time
+# dependency on libc10_cuda.so and therefore loads on a CPU-only torch (where
+# that library is absent). libcommux.so dlopen()s this sibling at runtime the
+# first time a CUDA tensor is exchanged. Built next to libcommux.so (build tree
+# and installed wheel alike) so the dladdr-based lookup finds it; INSTALL_RPATH
+# $ORIGIN matches libcommux.so, and its libc10_cuda.so is resolved from the
+# already-loaded torch (global scope) -- exactly as libtorch.so is today.
+# ---------------------------------------------------------------------------
 if(_commux_cuda)
-  target_compile_definitions(commux PRIVATE COMMUX_WITH_CUDA=1)
-  target_link_libraries(commux PUBLIC ${C10_CUDA_LIB})
-  target_include_directories(commux SYSTEM PRIVATE ${COMMUX_CUDA_INCLUDE_DIRS})
+  add_library(commux_cuda SHARED src/cuda_sync.cpp)
+  set_target_properties(commux_cuda PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    BUILD_RPATH "${TORCH_INSTALL_PREFIX}/lib"
+    INSTALL_RPATH "$ORIGIN")
+  target_compile_definitions(commux_cuda PRIVATE COMMUX_WITH_CUDA=1)
+  target_include_directories(commux_cuda SYSTEM PRIVATE
+    ${TORCH_INCLUDE_DIRS} ${COMMUX_CUDA_INCLUDE_DIRS})
+  target_link_libraries(commux_cuda PRIVATE ${TORCH_LIBRARIES} ${C10_CUDA_LIB})
 endif()
 
 # ---------------------------------------------------------------------------
@@ -132,6 +151,9 @@ if(COMMUX_BUILD_TESTS)
     target_compile_definitions(test_commux PRIVATE COMMUX_WITH_CUDA=1)
     target_link_libraries(test_commux PRIVATE ${C10_CUDA_LIB})
     target_include_directories(test_commux SYSTEM PRIVATE ${COMMUX_CUDA_INCLUDE_DIRS})
+    # libcommux.so dlopen()s libcommux_cuda.so at runtime for CUDA stream-sync;
+    # ensure the sibling shim is built even for `--target test_commux`.
+    add_dependencies(test_commux commux_cuda)
   endif()
   set_target_properties(test_commux PROPERTIES BUILD_RPATH "${UCX_LIBRARY_DIR}")
 endif()
@@ -163,6 +185,10 @@ if(COMMUX_BUILD_PYTHON)
   #   commux/include/{ucp,ucs,uct,ucm}/*.h   vendored UCX headers
   install(TARGETS commux_pybind LIBRARY DESTINATION commux)
   install(TARGETS commux LIBRARY DESTINATION commux/lib)
+  # The CUDA stream-sync shim ships next to libcommux.so (dlopen'd at runtime).
+  if(_commux_cuda)
+    install(TARGETS commux_cuda LIBRARY DESTINATION commux/lib)
+  endif()
   install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/"
           DESTINATION commux/include
           FILES_MATCHING PATTERN "*.hpp")
