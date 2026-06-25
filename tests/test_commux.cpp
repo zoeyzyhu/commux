@@ -16,10 +16,12 @@
 
 #include <torch/torch.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 #include <torch/csrc/distributed/c10d/TCPStore.hpp>
 #include <vector>
 
@@ -237,6 +239,36 @@ int main(int argc, char** argv) {
           V, ITERS, us, c ? c : "default");
     }
     pg->barrier()->wait();
+  }
+
+  // --- Test 6: concurrent multi-threaded send/recv (COMMUX_MT=1) -----------
+  // Two threads per rank drive the SAME process group concurrently, each
+  // exchanging with the peer on its own tag for many iterations. Validates
+  // thread-safe worker access (UCS_THREAD_MODE_MULTI) and the lock-free
+  // blocking wait -- the old serialized, wait-holds-the-lock design would
+  // serialize and could deadlock multi-threaded consumers such as snapy.
+  if (std::getenv("COMMUX_MT") && size == 2) {
+    const int NT = 2, ITERS = 200;
+    int peer = 1 - rank;
+    std::atomic<int> good{0};
+    auto job = [&](int t) {
+      bool ok = true;
+      for (int it = 0; it < ITERS && ok; ++it) {
+        double val = rank * 1000 + t * 10 + (it % 7);
+        std::vector<at::Tensor> sv{torch::full({16}, val, f64)};
+        std::vector<at::Tensor> rv{torch::zeros({16}, f64)};
+        auto wr = pg->recv(rv, peer, 600 + t);
+        auto ws = pg->send(sv, peer, 600 + t);
+        wr->wait();
+        ws->wait();
+        ok = rv[0].eq(peer * 1000 + t * 10 + (it % 7)).all().item<bool>();
+      }
+      if (ok) good.fetch_add(1);
+    };
+    std::vector<std::thread> ths;
+    for (int t = 0; t < NT; ++t) ths.emplace_back(job, t);
+    for (auto& th : ths) th.join();
+    check(good.load() == NT, "concurrent multi-threaded send/recv (2 threads)");
   }
 
   pg->barrier()->wait();

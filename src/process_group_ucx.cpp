@@ -188,21 +188,21 @@ class UCXWork : public c10d::Work {
 
   bool wait(std::chrono::milliseconds /*timeout*/ = kNoTimeout) override {
     std::unique_lock<std::mutex> lock(*mu_);
-    // Event-driven wait: reap finished requests, drain any further ready
-    // completions, then block on the worker's wakeup fd until the next event
-    // instead of busy-spinning ucp_worker_progress() and burning a CPU core.
-    // worker_mu_ is held across ucp_worker_wait(): the worker is driven by a
-    // single thread per rank (UCS_THREAD_MODE_SERIALIZED) and progressing it
-    // here also advances every other in-flight Work, so sequential wait() calls
-    // cannot deadlock.
+    // Event-driven wait. The worker is UCS_THREAD_MODE_MULTI (internally
+    // thread-safe), so we advance/block on it WITHOUT holding *mu_: a thread
+    // parked here must not block other threads from posting and progressing the
+    // shared worker -- their progress is precisely what completes this Work.
+    // (Holding *mu_ across a blocking ucp_worker_wait() would serialize, and
+    // can deadlock, multi-threaded consumers such as snapy.) *mu_ guards only
+    // the per-Work request state reaped here.
     while (!reap_locked()) {
-      if (ucp_worker_progress(worker_)) continue;  // advanced; re-check
-      if (ucp_worker_wait(worker_) != UCS_OK) {
-        // Wakeup unavailable in this UCX config: yield rather than hard-spin.
-        lock.unlock();
-        std::this_thread::yield();
-        lock.lock();
+      lock.unlock();
+      if (!ucp_worker_progress(worker_)) {
+        // Idle: sleep on the worker's wakeup fd until the next event (no
+        // busy-spin), or yield if this UCX config exposes no wakeup fd.
+        if (ucp_worker_wait(worker_) != UCS_OK) std::this_thread::yield();
       }
+      lock.lock();
     }
     if (err_) {
       std::rethrow_exception(err_);
@@ -317,10 +317,26 @@ void ProcessGroupUCX::init_ucx() {
   ucp_worker_params_t wp;
   std::memset(&wp, 0, sizeof(wp));
   wp.field_mask = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
-  wp.thread_mode = UCS_THREAD_MODE_SERIALIZED;
+  // MULTI: the worker is shared across threads by multi-threaded consumers
+  // (e.g. snapy drives per-block exchanges on separate threads). UCX serializes
+  // worker access internally, so wait() can block on it without holding
+  // worker_mu_ -- letting other threads keep posting/progressing meanwhile.
+  wp.thread_mode = UCS_THREAD_MODE_MULTI;
 
   st = ucp_worker_create(context_, &wp, &worker_);
   TORCH_CHECK(st == UCS_OK, "ucp_worker_create: ", ucs_status_string(st));
+
+  // Verify we actually got a multi-thread-safe worker; the lock-free wait above
+  // relies on it. (Bundled UCX is built --enable-mt.)
+  ucp_worker_attr_t attr;
+  std::memset(&attr, 0, sizeof(attr));
+  attr.field_mask = UCP_WORKER_ATTR_FIELD_THREAD_MODE;
+  st = ucp_worker_query(worker_, &attr);
+  TORCH_CHECK(st == UCS_OK, "ucp_worker_query: ", ucs_status_string(st));
+  TORCH_CHECK(attr.thread_mode == UCS_THREAD_MODE_MULTI,
+              "commux needs a multi-thread-safe UCX worker (got thread_mode=",
+              static_cast<int>(attr.thread_mode),
+              "); build UCX with --enable-mt.");
 }
 
 void ProcessGroupUCX::bootstrap_endpoints() {
