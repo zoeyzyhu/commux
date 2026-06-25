@@ -14,7 +14,6 @@
 //   test_commux <rank> <world_size> [master_host=127.0.0.1] [master_port=29555]
 //   UCXPG_DEVICE=cuda  runs the same checks on GPU tensors.
 
-#include <c10/cuda/CUDAFunctions.h>
 #include <torch/torch.h>
 
 #include <chrono>
@@ -25,6 +24,12 @@
 #include <vector>
 
 #include "commux/process_group_ucx.hpp"
+
+// c10::cuda::set_device lives in c10_cuda; its header pulls in a generated CUDA
+// macro file that is absent from CPU-only torch, so guard it (and the call).
+#ifdef COMMUX_WITH_CUDA
+#include <c10/cuda/CUDAFunctions.h>
+#endif
 
 namespace {
 
@@ -69,7 +74,9 @@ int main(int argc, char** argv) {
     }
     int dev_index = rank % static_cast<int>(torch::cuda::device_count());
     device = torch::Device(torch::kCUDA, dev_index);
+#ifdef COMMUX_WITH_CUDA
     c10::cuda::set_device(dev_index);
+#endif
   }
   std::printf("[rank %d/%d] commux process group up (backend=%s, device=%s)\n",
               rank, size, pg->getBackendName().c_str(),
