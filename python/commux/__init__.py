@@ -27,7 +27,7 @@ import torch.distributed as dist  # noqa: E402
 
 from . import _C  # noqa: E402  (compiled extension)
 
-__all__ = ["register", "create_backend"]
+__all__ = ["register", "create_backend", "preferred_backend"]
 
 _REGISTERED = False
 
@@ -51,3 +51,25 @@ def register(names=("ucx", "commux")):
             name, create_backend, devices=["cpu", "cuda"]
         )
     _REGISTERED = True
+
+
+def preferred_backend(name="ucx"):
+    """Return the c10d backend name to use on this platform, registering commux.
+
+    commux installs only where UCX is supported (Linux), so if you can import it
+    and call this, UCX is available -- on CPU **and** CUDA. It registers commux
+    and returns ``"ucx"``. The portable pattern is to guard the import and fall
+    back to ``"gloo"`` where commux is absent (e.g. macOS)::
+
+        try:
+            from commux import preferred_backend
+            backend = preferred_backend()   # registers commux -> "ucx"
+        except ImportError:
+            backend = "gloo"                # macOS / no UCX
+        dist.init_process_group(backend=backend, init_method="env://")
+
+    This is how UCX replaces Gloo on CPU where UCX exists, while keeping Gloo as
+    the fallback elsewhere.
+    """
+    register()
+    return name

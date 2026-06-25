@@ -61,6 +61,25 @@ Launch with `torchrun --nproc-per-node=N ...` as usual.
 > then wait). Blocking out-of-order send/recv deadlocks under the CUDA
 > rendezvous protocol, exactly as with real MPI.
 
+### Picking a backend portably (replace Gloo where UCX exists)
+
+`commux` works on **CPU** as well as CUDA, so on Linux you can use it instead of
+Gloo for CPU collectives/p2p. Since `commux` installs only where UCX is supported
+(Linux), the import itself is the availability check — prefer it, and fall back
+to Gloo elsewhere (e.g. macOS):
+
+```python
+try:
+    from commux import preferred_backend
+    backend = preferred_backend()   # registers commux, returns "ucx"
+except ImportError:
+    backend = "gloo"                # macOS / no UCX
+dist.init_process_group(backend=backend, init_method="env://")
+```
+
+The fallback lives in the consumer because `commux` is absent on the
+unsupported platform; `commux` itself is the UCX provider on both CPU and CUDA.
+
 ## Use from C++
 
 Because the wheel ships the C++ **library + headers** (and bundles UCX), a C++
