@@ -12,20 +12,18 @@
 // both CPU host tensors and CUDA device tensors (UCX cuda_copy / cuda_ipc /
 // gdr_copy).
 
+#include <ATen/core/Tensor.h>
+#include <c10/util/intrusive_ptr.h>
+#include <ucp/api/ucp.h>
+
 #include <cstdint>
 #include <mutex>
 #include <string>
-#include <vector>
-
-#include <ucp/api/ucp.h>
-
-#include <ATen/core/Tensor.h>
-#include <c10/util/intrusive_ptr.h>
-
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
 #include <torch/csrc/distributed/c10d/Types.hpp>
 #include <torch/csrc/distributed/c10d/Work.hpp>
+#include <vector>
 
 namespace commux {
 
@@ -90,8 +88,8 @@ class ProcessGroupUCX : public c10d::Backend {
   // Caller must hold worker_mu_.
   void* post_send(const at::Tensor& t, int dst, uint32_t user_tag,
                   uint32_t sub_index, bool collective);
-  void* post_recv(at::Tensor& t, int src, uint32_t user_tag,
-                  uint32_t sub_index, bool collective);
+  void* post_recv(at::Tensor& t, int src, uint32_t user_tag, uint32_t sub_index,
+                  bool collective);
 
   // Blocking variants used by the collective algorithms. Caller holds the lock.
   void coll_send(const at::Tensor& t, int dst, uint32_t user_tag);
@@ -109,19 +107,21 @@ class ProcessGroupUCX : public c10d::Backend {
 
   ucp_context_h context_ = nullptr;
   ucp_worker_h worker_ = nullptr;
-  std::vector<ucp_ep_h> eps_;  // one endpoint per peer rank (eps_[rank_] unused)
+  std::vector<ucp_ep_h>
+      eps_;  // one endpoint per peer rank (eps_[rank_] unused)
 
   // Serializes all access to the single ucp worker (post + progress + wait).
   std::mutex worker_mu_;
 
   // Coalescing (group) state. While a window is open (COMMUX_GROUP=1), send()/
-  // recv() append to deferred_ and return the shared pending_ Work; endCoalescing
-  // flushes deferred_ as one batch (one stream-sync). Posts use the same
-  // per-tensor tags as the non-grouped path, so the wire format is unchanged --
-  // a grouping rank interoperates with a non-grouping peer.
+  // recv() append to deferred_ and return the shared pending_ Work;
+  // endCoalescing flushes deferred_ as one batch (one stream-sync). Posts use
+  // the same per-tensor tags as the non-grouped path, so the wire format is
+  // unchanged -- a grouping rank interoperates with a non-grouping peer.
   struct DeferredOp {
     bool is_send;
-    std::vector<at::Tensor> keep;  // buffers held alive until the flush completes
+    std::vector<at::Tensor>
+        keep;  // buffers held alive until the flush completes
     int peer;
     uint32_t tag;
   };

@@ -1,19 +1,18 @@
-// pybind module commux._C: exposes a factory that builds a commux::ProcessGroupUCX
-// so it can be registered with torch.distributed (see commux/__init__.py).
+// pybind module commux._C: exposes a factory that builds a
+// commux::ProcessGroupUCX so it can be registered with torch.distributed (see
+// commux/__init__.py).
 //
 // torch calls the registered creator as creator(store, rank, size, timeout) and
 // expects a c10d::Backend back; ProcessGroupUCX is one.
 
-#include <chrono>
-#include <utility>
-
-#include <torch/extension.h>
+#include <pybind11/chrono.h>
 #include <torch/csrc/utils/pybind.h>
+#include <torch/extension.h>
 
+#include <chrono>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
-
-#include <pybind11/chrono.h>
+#include <utility>
 
 #include "commux/process_group_ucx.hpp"
 

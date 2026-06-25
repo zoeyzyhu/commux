@@ -1,13 +1,13 @@
 #include "commux/process_group_ucx.hpp"
 
+#include <ATen/ATen.h>
+#include <c10/util/Exception.h>
+
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
 #include <thread>
-
-#include <ATen/ATen.h>
-#include <c10/util/Exception.h>
 
 #ifdef COMMUX_WITH_CUDA
 #include <c10/cuda/CUDAStream.h>
@@ -48,19 +48,20 @@ void sync_stream_if_cuda(const at::Tensor& t) {
 #endif
 }
 
-// Halo exchange hands commux a whole vector of per-variable ghost tensors in one
-// send()/recv() call. With COMMUX_COALESCE=1 they are merged into a single UCX
-// tagged message via the IOV datatype (see send/recv).
+// Halo exchange hands commux a whole vector of per-variable ghost tensors in
+// one send()/recv() call. With COMMUX_COALESCE=1 they are merged into a single
+// UCX tagged message via the IOV datatype (see send/recv).
 //
 // OPT-IN (default off) on purpose: coalescing is NOT a universal win. UCX's IOV
 // path for CUDA is not zero-copy -- it gathers the V device buffers into a
 // staging buffer -- so coalescing trades V rendezvous handshakes for
-// 1 handshake + 1 gather/scatter copy + the loss of pipelining that V concurrent
-// in-flight messages enjoy. Measured intra-node (cuda_ipc): faster for small V
-// (V=2: 81 vs 116 us round-trip), SLOWER for large V (V=16: 481 vs 315 us);
-// neutral for the bandwidth-bound CRM halo. It is most likely to pay off on
-// high-latency links (InfiniBand multi-node) where handshakes dominate -- so it
-// is exposed as a flag to benchmark per deployment rather than forced on.
+// 1 handshake + 1 gather/scatter copy + the loss of pipelining that V
+// concurrent in-flight messages enjoy. Measured intra-node (cuda_ipc): faster
+// for small V (V=2: 81 vs 116 us round-trip), SLOWER for large V (V=16: 481 vs
+// 315 us); neutral for the bandwidth-bound CRM halo. It is most likely to pay
+// off on high-latency links (InfiniBand multi-node) where handshakes dominate
+// -- so it is exposed as a flag to benchmark per deployment rather than forced
+// on.
 bool coalesce_enabled() {
   static const bool v = [] {
     const char* e = std::getenv("COMMUX_COALESCE");
@@ -106,7 +107,10 @@ void sync_batch_streams(const std::vector<at::Tensor>& ts) {
     auto dev = ts[i].device().index();
     bool seen = false;
     for (size_t j = 0; j < i; ++j)
-      if (ts[j].is_cuda() && ts[j].device().index() == dev) { seen = true; break; }
+      if (ts[j].is_cuda() && ts[j].device().index() == dev) {
+        seen = true;
+        break;
+      }
     if (!seen) c10::cuda::getCurrentCUDAStream(dev).synchronize();
   }
 #else
@@ -262,8 +266,8 @@ c10::intrusive_ptr<c10d::Work> completed_work(c10d::OpType opType,
 
 }  // namespace
 
-ProcessGroupUCX::ProcessGroupUCX(c10::intrusive_ptr<c10d::Store> store, int rank,
-                                 int size)
+ProcessGroupUCX::ProcessGroupUCX(c10::intrusive_ptr<c10d::Store> store,
+                                 int rank, int size)
     : c10d::Backend(rank, size),
       store_(std::move(store)),
       rank_(rank),
@@ -321,8 +325,8 @@ void ProcessGroupUCX::init_ucx() {
 
 void ProcessGroupUCX::bootstrap_endpoints() {
   // Publish this worker's address through the c10d store (out-of-band
-  // rendezvous). Any c10d::Store works -- a TCPStore for standalone runs, or the
-  // PrefixStore torch.distributed hands to a backend.
+  // rendezvous). Any c10d::Store works -- a TCPStore for standalone runs, or
+  // the PrefixStore torch.distributed hands to a backend.
   ucp_address_t* addr = nullptr;
   size_t addr_len = 0;
   ucs_status_t st = ucp_worker_get_address(worker_, &addr, &addr_len);
@@ -350,8 +354,9 @@ void ProcessGroupUCX::bootstrap_endpoints() {
   }
 }
 
-void* ProcessGroupUCX::post_send(const at::Tensor& t, int dst, uint32_t user_tag,
-                                 uint32_t sub_index, bool collective) {
+void* ProcessGroupUCX::post_send(const at::Tensor& t, int dst,
+                                 uint32_t user_tag, uint32_t sub_index,
+                                 bool collective) {
   TORCH_CHECK(dst >= 0 && dst < size_ && dst != rank_,
               "commux send: invalid dst rank ", dst);
   // Stream sync is the caller's responsibility (send()/coll_send() sync the
@@ -371,8 +376,9 @@ void* ProcessGroupUCX::post_send(const at::Tensor& t, int dst, uint32_t user_tag
 
 void* ProcessGroupUCX::post_recv(at::Tensor& t, int src, uint32_t user_tag,
                                  uint32_t sub_index, bool collective) {
-  TORCH_CHECK(t.is_contiguous(), "commux recv: destination tensor must be "
-                                 "contiguous");
+  TORCH_CHECK(t.is_contiguous(),
+              "commux recv: destination tensor must be "
+              "contiguous");
   // Stream sync is the caller's responsibility (recv()/coll_recv() sync once).
   ucp_tag_t tag = make_ucp_tag(src, user_tag, sub_index, collective);
   ucp_tag_t mask = ~static_cast<ucp_tag_t>(0);  // exact (sender, tag) match
@@ -453,8 +459,8 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupUCX::send(
     std::vector<ucp_dt_iov_t> iov;
     iov.reserve(keep.size());
     for (auto& c : keep)
-      iov.push_back({c.data_ptr(),
-                     static_cast<size_t>(c.numel()) * c.element_size()});
+      iov.push_back(
+          {c.data_ptr(), static_cast<size_t>(c.numel()) * c.element_size()});
 
     ucp_request_param_t p;
     std::memset(&p, 0, sizeof(p));
@@ -466,14 +472,15 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupUCX::send(
     void* req =
         ucp_tag_send_nbx(eps_[dstRank], iov.data(), iov.size(), tagv, &p);
     reqs.push_back(normalize_request(req, "tag_send(iov)"));
-    return c10::make_intrusive<UCXWork>(worker_, &worker_mu_, c10d::OpType::SEND,
-                                        std::move(reqs), std::move(keep),
+    return c10::make_intrusive<UCXWork>(worker_, &worker_mu_,
+                                        c10d::OpType::SEND, std::move(reqs),
+                                        std::move(keep),
                                         /*source_rank=*/-1, std::move(iov));
   }
 
   // Fallback: one message per tensor (single tensor, mixed memory type, or
-  // COMMUX_COALESCE=0). post_send no longer syncs -- the batch sync above covers
-  // it.
+  // COMMUX_COALESCE=0). post_send no longer syncs -- the batch sync above
+  // covers it.
   reqs.reserve(keep.size());
   for (size_t i = 0; i < keep.size(); ++i)
     reqs.push_back(post_send(keep[i], dstRank, static_cast<uint32_t>(tag),
@@ -508,14 +515,15 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupUCX::recv(
   ucs_memory_type_t mt;
   // Symmetric to send(): scatter one coalesced message into the V recv buffers
   // via IOV. Total bytes equal the sender's by symmetric buffer construction.
-  if (tensors.size() > 1 && coalesce_enabled() && homogeneous_memtype(tensors, mt)) {
+  if (tensors.size() > 1 && coalesce_enabled() &&
+      homogeneous_memtype(tensors, mt)) {
     std::vector<ucp_dt_iov_t> iov;
     iov.reserve(tensors.size());
     for (auto& t : tensors) {
       TORCH_CHECK(t.is_contiguous(),
                   "commux recv: destination tensor must be contiguous");
-      iov.push_back({t.data_ptr(),
-                     static_cast<size_t>(t.numel()) * t.element_size()});
+      iov.push_back(
+          {t.data_ptr(), static_cast<size_t>(t.numel()) * t.element_size()});
     }
 
     ucp_request_param_t p;
@@ -529,9 +537,9 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupUCX::recv(
     void* req =
         ucp_tag_recv_nbx(worker_, iov.data(), iov.size(), tagv, mask, &p);
     reqs.push_back(normalize_request(req, "tag_recv(iov)"));
-    return c10::make_intrusive<UCXWork>(worker_, &worker_mu_, c10d::OpType::RECV,
-                                        std::move(reqs), tensors,
-                                        /*source_rank=*/-1, std::move(iov));
+    return c10::make_intrusive<UCXWork>(
+        worker_, &worker_mu_, c10d::OpType::RECV, std::move(reqs), tensors,
+        /*source_rank=*/-1, std::move(iov));
   }
 
   reqs.reserve(tensors.size());
@@ -550,11 +558,13 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupUCX::recvAnysource(
   int source_rank = -1;
   for (size_t i = 0; i < tensors.size(); ++i) {
     at::Tensor& t = tensors[i];
-    TORCH_CHECK(t.is_contiguous(), "commux recvAnysource: tensor must be "
-                                   "contiguous");
+    TORCH_CHECK(t.is_contiguous(),
+                "commux recvAnysource: tensor must be "
+                "contiguous");
     sync_stream_if_cuda(t);
-    ucp_tag_t want = make_ucp_tag(0, static_cast<uint32_t>(tag),
-                                  static_cast<uint32_t>(i), /*collective=*/false);
+    ucp_tag_t want =
+        make_ucp_tag(0, static_cast<uint32_t>(tag), static_cast<uint32_t>(i),
+                     /*collective=*/false);
     ucp_tag_recv_info_t info;
     ucp_tag_message_h msg = nullptr;
     while ((msg = ucp_tag_probe_nb(worker_, want, kTagMaskAnySource,
@@ -573,9 +583,9 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupUCX::recvAnysource(
     void* req = ucp_tag_msg_recv_nbx(worker_, t.data_ptr(), nbytes, msg, &p);
     wait_request(normalize_request(req, "tag_msg_recv"));
   }
-  return c10::make_intrusive<UCXWork>(worker_, &worker_mu_,
-                                      c10d::OpType::RECVANYSOURCE,
-                                      std::vector<void*>{}, tensors, source_rank);
+  return c10::make_intrusive<UCXWork>(
+      worker_, &worker_mu_, c10d::OpType::RECVANYSOURCE, std::vector<void*>{},
+      tensors, source_rank);
 }
 
 // -------------------------------------------------------------------------
@@ -606,7 +616,8 @@ void ProcessGroupUCX::broadcast_locked(std::vector<at::Tensor>& tensors,
                                        int root) {
   for (size_t i = 0; i < tensors.size(); ++i) {
     at::Tensor& t = tensors[i];
-    TORCH_CHECK(t.is_contiguous(), "commux broadcast: tensor must be contiguous");
+    TORCH_CHECK(t.is_contiguous(),
+                "commux broadcast: tensor must be contiguous");
     if (rank_ == root) {
       for (int r = 0; r < size_; ++r) {
         if (r == root) continue;
@@ -660,10 +671,10 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupUCX::barrier(
 
 // ---------------------------------------------------------------------------
 // Coalescing (group) window -- the c10d analog of ncclGroupStart/ncclGroupEnd.
-// Op-batching only: deferred ops are posted with the same per-tensor tags as the
-// non-grouped path (wire-compatible with a non-grouping peer); the single win is
-// one stream-sync + one aggregate Work for the whole exchange. IOV packing stays
-// governed by COMMUX_COALESCE and is independent of grouping.
+// Op-batching only: deferred ops are posted with the same per-tensor tags as
+// the non-grouped path (wire-compatible with a non-grouping peer); the single
+// win is one stream-sync + one aggregate Work for the whole exchange. IOV
+// packing stays governed by COMMUX_COALESCE and is independent of grouping.
 // ---------------------------------------------------------------------------
 
 void ProcessGroupUCX::startCoalescing() {
@@ -676,10 +687,9 @@ void ProcessGroupUCX::startCoalescing() {
   }
   coalescing_ = true;
   deferred_.clear();
-  pending_ = c10::make_intrusive<UCXWork>(worker_, &worker_mu_,
-                                          c10d::OpType::COALESCED,
-                                          std::vector<void*>{},
-                                          std::vector<at::Tensor>{});
+  pending_ = c10::make_intrusive<UCXWork>(
+      worker_, &worker_mu_, c10d::OpType::COALESCED, std::vector<void*>{},
+      std::vector<at::Tensor>{});
 }
 
 c10::intrusive_ptr<c10d::Work> ProcessGroupUCX::endCoalescing() {
@@ -689,10 +699,10 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupUCX::endCoalescing() {
     // returned by send()/recv(); hand back a completed no-op aggregate.
     return completed_work(c10d::OpType::COALESCED, {}, worker_, &worker_mu_);
   }
-  // Close the window and take ownership of its state up front, so that even if a
-  // post below throws, the backend is left clean for the next exchange. (The
-  // already-posted requests of a failed flush are abandoned -- a post failure is
-  // fatal anyway.)
+  // Close the window and take ownership of its state up front, so that even if
+  // a post below throws, the backend is left clean for the next exchange. (The
+  // already-posted requests of a failed flush are abandoned -- a post failure
+  // is fatal anyway.)
   coalescing_ = false;
   auto deferred = std::move(deferred_);
   deferred_.clear();
@@ -708,11 +718,12 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupUCX::endCoalescing() {
   std::vector<void*> reqs;
   for (auto& op : deferred)
     for (size_t i = 0; i < op.keep.size(); ++i)
-      reqs.push_back(op.is_send
-          ? post_send(op.keep[i], op.peer, op.tag, static_cast<uint32_t>(i),
-                      /*collective=*/false)
-          : post_recv(op.keep[i], op.peer, op.tag, static_cast<uint32_t>(i),
-                      /*collective=*/false));
+      reqs.push_back(
+          op.is_send
+              ? post_send(op.keep[i], op.peer, op.tag, static_cast<uint32_t>(i),
+                          /*collective=*/false)
+              : post_recv(op.keep[i], op.peer, op.tag, static_cast<uint32_t>(i),
+                          /*collective=*/false));
 
   static_cast<UCXWork*>(work.get())->adopt(std::move(reqs), std::move(keep));
   return work;

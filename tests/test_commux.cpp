@@ -3,7 +3,8 @@
 // capabilities that motivate this backend:
 //
 //   1. Tag-matched point-to-point: rank 1 receives tag B *before* tag A while
-//      rank 0 sends A then B. Correct delivery proves real (sender,tag) matching
+//      rank 0 sends A then B. Correct delivery proves real (sender,tag)
+//      matching
 //      -- a case NCCL gets wrong because it ignores tags and matches by order.
 //      Posted non-blocking (post all, then wait) so it is deadlock-free under
 //      the rendezvous protocol CUDA uses.
@@ -13,15 +14,15 @@
 //   test_commux <rank> <world_size> [master_host=127.0.0.1] [master_port=29555]
 //   UCXPG_DEVICE=cuda  runs the same checks on GPU tensors.
 
+#include <c10/cuda/CUDAFunctions.h>
+#include <torch/torch.h>
+
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
-#include <vector>
-
-#include <torch/torch.h>
 #include <torch/csrc/distributed/c10d/TCPStore.hpp>
-#include <c10/cuda/CUDAFunctions.h>
+#include <vector>
 
 #include "commux/process_group_ucx.hpp"
 
@@ -38,9 +39,9 @@ void check(bool ok, const std::string& what) {
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::fprintf(stderr,
-                 "usage: %s <rank> <world_size> [host=127.0.0.1] [port=29555]\n",
-                 argv[0]);
+    std::fprintf(
+        stderr, "usage: %s <rank> <world_size> [host=127.0.0.1] [port=29555]\n",
+        argv[0]);
     return 2;
   }
   int rank = std::atoi(argv[1]);
@@ -62,7 +63,8 @@ int main(int argc, char** argv) {
   torch::Device device(torch::kCPU);
   if (want_cuda) {
     if (!torch::cuda::is_available()) {
-      std::fprintf(stderr, "[rank %d] CUDA requested but not available\n", rank);
+      std::fprintf(stderr, "[rank %d] CUDA requested but not available\n",
+                   rank);
       return 2;
     }
     int dev_index = rank % static_cast<int>(torch::cuda::device_count());
@@ -96,7 +98,8 @@ int main(int argc, char** argv) {
     auto wA = pg->recv(vA, /*src=*/0, TAG_A);  // ... then A
     wB->wait();
     wA->wait();
-    bool ok = bufB.eq(2.0).all().item<bool>() && bufA.eq(1.0).all().item<bool>();
+    bool ok =
+        bufB.eq(2.0).all().item<bool>() && bufA.eq(1.0).all().item<bool>();
     check(ok, "tag-matched p2p: out-of-order recv delivered by tag, not order");
   }
 
@@ -116,7 +119,8 @@ int main(int argc, char** argv) {
     };
     check(run(c10d::ReduceOp::SUM) == expect_sum, "allreduce SUM");
     check(run(c10d::ReduceOp::MIN) == 1.0, "allreduce MIN");
-    check(run(c10d::ReduceOp::MAX) == static_cast<double>(size), "allreduce MAX");
+    check(run(c10d::ReduceOp::MAX) == static_cast<double>(size),
+          "allreduce MAX");
   }
 
   // --- Test 3: reduce SUM to root 0 ---------------------------------------
@@ -138,7 +142,8 @@ int main(int argc, char** argv) {
   // --- Test 4: coalesced multi-tensor vector p2p (IOV path) ----------------
   // One send()/recv() call carrying V=3 differently-shaped tensors. With
   // COMMUX_COALESCE unset/1 this drives the IOV single-message path; with
-  // COMMUX_COALESCE=0 the per-tensor fallback. Both must deliver identical data.
+  // COMMUX_COALESCE=0 the per-tensor fallback. Both must deliver identical
+  // data.
   if (size >= 2) {
     const int TAG_V = 300;
     const std::vector<int64_t> shapes{5, 1, 8};
@@ -163,8 +168,8 @@ int main(int argc, char** argv) {
   // Mirrors a halo step: defer a recv + a send inside startCoalescing/
   // endCoalescing, then wait the single aggregate Work.
   const char* group_env = std::getenv("COMMUX_GROUP");
-  bool group_on =
-      group_env && (std::string(group_env) == "1" || std::string(group_env) == "on");
+  bool group_on = group_env && (std::string(group_env) == "1" ||
+                                std::string(group_env) == "on");
   if (group_on && size >= 2 && (rank == 0 || rank == 1)) {
     const int TG_A = 410, TG_B = 420;
     int peer = rank == 0 ? 1 : 0;
@@ -193,7 +198,8 @@ int main(int argc, char** argv) {
   // (1 vs V). COMMUX_BENCH_V sets V (default 16). -----------------------------
   if (std::getenv("COMMUX_BENCH") && size >= 2) {
     const int V = std::getenv("COMMUX_BENCH_V")
-                      ? std::atoi(std::getenv("COMMUX_BENCH_V")) : 16;
+                      ? std::atoi(std::getenv("COMMUX_BENCH_V"))
+                      : 16;
     const int ITERS = 2000;
     const int64_t N = 1024;
     std::vector<at::Tensor> sv, rv;
@@ -218,18 +224,19 @@ int main(int argc, char** argv) {
       double us =
           std::chrono::duration<double, std::micro>(t1 - t0).count() / ITERS;
       const char* c = std::getenv("COMMUX_COALESCE");
-      std::printf("[bench] V=%d iters=%d round-trip=%.2f us/iter "
-                  "(COMMUX_COALESCE=%s)\n",
-                  V, ITERS, us, c ? c : "default");
+      std::printf(
+          "[bench] V=%d iters=%d round-trip=%.2f us/iter "
+          "(COMMUX_COALESCE=%s)\n",
+          V, ITERS, us, c ? c : "default");
     }
     pg->barrier()->wait();
   }
 
   pg->barrier()->wait();
   if (rank == 0) {
-    std::printf(g_failures == 0 ? "\nALL TESTS PASSED\n"
-                                : "\n%d TEST(S) FAILED\n",
-                g_failures);
+    std::printf(
+        g_failures == 0 ? "\nALL TESTS PASSED\n" : "\n%d TEST(S) FAILED\n",
+        g_failures);
   }
   return g_failures == 0 ? 0 : 1;
 }
