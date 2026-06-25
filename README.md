@@ -1,5 +1,7 @@
 # commux
 
+[![CI](https://github.com/zoeyzyhu/commux/actions/workflows/ci.yml/badge.svg)](https://github.com/zoeyzyhu/commux/actions/workflows/ci.yml)
+
 A custom **PyTorch `c10d` backend over UCX** that gives real **MPI-style
 `(sender, tag)` point-to-point matching** — the thing NCCL cannot do — plus
 `allreduce` / `reduce` / `broadcast` / `barrier`, on **CPU host tensors and CUDA
@@ -12,21 +14,30 @@ and matches only by stream/communicator ordering. commux honors tags via UCX's
 
 ## Install
 
-commux needs **UCX** (optionally built `--with-gdrcopy` for GPUDirect RDMA). You
-do **not** have to install UCX yourself — if no system UCX is found, the build
-fetches and builds it (and the gdrcopy userspace lib) automatically.
+commux is **Linux-only** (it builds on UCX, which does not compile on macOS) and
+needs **UCX** — but you do **not** install UCX yourself: every wheel **vendors
+UCX (+ the gdrcopy userspace lib)**, so a `pip install` is self-contained.
 
 ```bash
-# Python package (registers a torch.distributed backend). Build against your
-# active torch (no build isolation):
+# Released wheel (self-contained: bundled UCX, no system UCX needed):
+pip install commux
+pip install "commux @ git+https://github.com/zoeyzyhu/commux"
+
+# From a source checkout -- builds against your active torch, so no isolation:
 pip install . --no-build-isolation
 
-# Use a preinstalled / module UCX instead of auto-building:
-UCX_ROOT=/path/to/ucx pip install . --no-build-isolation
+# Use a preinstalled / module UCX instead of building one from source:
+UCX_ROOT=/path/to/ucx pip install . --no-build-isolation \
+  -C cmake.define.COMMUX_UCX_PROVIDER=system
 
-# Force building UCX(+gdrcopy) from source even if one exists:
+# Force building UCX(+gdrcopy) from source even if a system one exists:
 pip install . --no-build-isolation -C cmake.define.COMMUX_UCX_PROVIDER=bundled
 ```
+
+The installed package under `site-packages/commux/` is fully self-contained:
+`_C.so` (the extension), `lib/libcommux.so` plus the vendored `lib/libuc*.so` /
+`libgdrapi.so` (relocatable — repointed to `$ORIGIN`), and `include/` with the
+commux **and** UCX C++ headers for downstream C++ consumers (see below).
 
 > `gdr_copy` only engages at runtime when the `gdrdrv` kernel module is loaded
 > (`/dev/gdrdrv`) and an RDMA NIC is present; otherwise UCX uses
@@ -52,20 +63,35 @@ Launch with `torchrun --nproc-per-node=N ...` as usual.
 
 ## Use from C++ (e.g. snapy)
 
-`commux` exports a CMake target `commux::commux`. Pull it in via FetchContent and
-construct the backend directly:
+Because the wheel ships the C++ **library + headers** (and bundles UCX), a C++
+project can just **`pip install commux`** and link the installed package — no
+source build, no UCX of its own. Locate it from CMake by probing the Python
+package (this is what snapy's `FindCommux.cmake` does):
 
 ```cmake
-include(FetchContent)
-FetchContent_Declare(commux GIT_REPOSITORY https://github.com/zoeyzyhu/commux GIT_TAG v0.1.0)
-FetchContent_MakeAvailable(commux)
-target_link_libraries(your_lib PUBLIC commux::commux)
+execute_process(
+  COMMAND ${Python3_EXECUTABLE} -c "import commux,os;print(os.path.dirname(commux.__file__))"
+  OUTPUT_VARIABLE COMMUX_DIR OUTPUT_STRIP_TRAILING_WHITESPACE)
+find_library(COMMUX_LIBRARY commux HINTS ${COMMUX_DIR}/lib)
+include_directories(${COMMUX_DIR}/include)  # commux/*.hpp + bundled ucp/*.h
+link_directories(${COMMUX_DIR}/lib)         # lets the linker resolve bundled UCX
+target_link_libraries(your_lib PUBLIC ${COMMUX_LIBRARY})
 ```
 ```cpp
 #include <commux/process_group_ucx.hpp>
 auto backend = c10::make_intrusive<commux::ProcessGroupUCX>(store, rank, size);
 pg->setBackend(c10::DeviceType::CPU,  c10d::ProcessGroup::BackendType::CUSTOM, backend);
 pg->setBackend(c10::DeviceType::CUDA, c10d::ProcessGroup::BackendType::CUSTOM, backend);
+```
+
+Prefer to build from source? commux also exports the CMake target
+`commux::commux`, so FetchContent works too:
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(commux GIT_REPOSITORY https://github.com/zoeyzyhu/commux GIT_TAG main)
+FetchContent_MakeAvailable(commux)
+target_link_libraries(your_lib PUBLIC commux::commux)
 ```
 
 ## Build the C++ tests
