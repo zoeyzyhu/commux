@@ -7,6 +7,15 @@ on:
   push:
     branches: [main]
 
+# Cancel an in-progress run when a new commit lands on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: CI only needs to read the repo.
+permissions:
+  contents: read
+
 env:
   PYTHON_VERSION: "3.11"
   BUILD_TYPE: Release
@@ -14,9 +23,10 @@ env:
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -27,7 +37,7 @@ jobs:
         run: pip install --user cpplint cppcheck clang-format==20.1.4
 
       - name: Cache pre-commit
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cache/pre-commit
           key: ${{ runner.os }}-pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
@@ -43,9 +53,10 @@ jobs:
   build-and-test:
     needs: pre-commit
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0 # full history for setuptools-scm version
 
