@@ -271,6 +271,70 @@ int main(int argc, char** argv) {
     check(good.load() == NT, "concurrent multi-threaded send/recv (2 threads)");
   }
 
+  // --- Test 7: many threads parked in wait must all wake (no lost wakeup) ----
+  // (COMMUX_DEADLOCK=1) Regression for the snapy hang. Several receiver threads
+  // each post a recv and block at the SAME time, before the sender sends (it
+  // delays), so all of them are genuinely parked in the wait concurrently. The
+  // old wait slept in an infinite ucp_worker_wait(): when multiple threads are
+  // armed on the one shared worker's wakeup fd, a single arriving event wakes
+  // only ONE of them, leaving the others parked forever -- the lost-wakeup
+  // deadlock that hit snapy's multi-threaded BlockWorkerPool driving the
+  // worker. The periodic wait (worker_wait_timed) re-progresses on a short
+  // timeout, so every thread makes progress regardless of who consumes the
+  // event. A watchdog aborts on regression rather than hanging the suite.
+  if (std::getenv("COMMUX_DEADLOCK") && size == 2) {
+    const int NT = 8;  // threads parked on the shared worker at once
+    const int64_t N = 1024;
+    const int TG = 700;
+    int peer = 1 - rank;
+    std::atomic<bool> done{false};
+    std::thread watchdog([&] {
+      for (int i = 0; i < 600 && !done.load(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      if (!done.load()) {
+        std::fprintf(stderr,
+                     "[rank %d] Test 7 TIMEOUT (30s): threads parked in wait "
+                     "did not all wake (lost-wakeup regression)\n",
+                     rank);
+        std::abort();
+      }
+    });
+    // Lost wakeups are a scheduling race, so repeat: any one losing round hangs
+    // (and trips the watchdog). Each round spawns NT recv threads that all
+    // park, then -- after a delay -- delivers every message in a single burst.
+    // On the buggy wait one waking thread drains all NT completions via one
+    // ucp_worker_progress() while the others stay asleep on the (already
+    // consumed) wakeup fd, so they never re-check and hang.
+    const int ROUNDS = 16;
+    std::atomic<int> good{0};
+    auto recv_job = [&](int t) {
+      auto r = torch::zeros({N}, f64);
+      std::vector<at::Tensor> v{r};
+      pg->recv(v, peer, TG + t)->wait();  // parks; NT of these at once
+      if (r.eq(static_cast<double>(peer * 100 + t)).all().item<bool>())
+        good.fetch_add(1);
+    };
+    for (int round = 0; round < ROUNDS; ++round) {
+      std::vector<std::thread> recvs;
+      for (int t = 0; t < NT; ++t) recvs.emplace_back(recv_job, t);
+      std::this_thread::sleep_for(std::chrono::milliseconds(400));  // let parks
+      std::vector<at::Tensor> sbufs;
+      std::vector<c10::intrusive_ptr<c10d::Work>> sw;
+      for (int t = 0; t < NT; ++t) {  // burst: post all sends, then wait
+        sbufs.push_back(
+            torch::full({N}, static_cast<double>(rank * 100 + t), f64));
+        std::vector<at::Tensor> v{sbufs.back()};
+        sw.push_back(pg->send(v, peer, TG + t));
+      }
+      for (auto& w : sw) w->wait();
+      for (auto& th : recvs) th.join();
+    }
+    check(good.load() == NT * ROUNDS,
+          "concurrent parked waits all wake (no lost wakeup)");
+    done.store(true);
+    watchdog.join();
+  }
+
   pg->barrier()->wait();
   if (rank == 0) {
     std::printf(
