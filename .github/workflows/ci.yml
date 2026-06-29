@@ -101,6 +101,10 @@ jobs:
 
       - name: C++ test (2 ranks over TCPStore)
         run: |
+          # COMMUX_MT runs the concurrent multi-threaded send/recv test;
+          # COMMUX_DEADLOCK runs the lost-wakeup regression test (many threads
+          # parked on the shared worker must all wake). Both are 2-rank.
+          export COMMUX_MT=1 COMMUX_DEADLOCK=1
           ./build/test_commux 1 2 127.0.0.1 29555 &
           ./build/test_commux 0 2 127.0.0.1 29555
           wait

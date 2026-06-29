@@ -3,6 +3,7 @@
 #include <ATen/ATen.h>
 #include <c10/util/Exception.h>
 #include <dlfcn.h>
+#include <poll.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -28,6 +29,52 @@ namespace {
 // runtime -- Tensor::is_cuda() only inspects the device type.
 ucs_memory_type_t mem_type_of(const at::Tensor& t) {
   return t.is_cuda() ? UCS_MEMORY_TYPE_CUDA : UCS_MEMORY_TYPE_HOST;
+}
+
+// Max idle sleep (ms) inside a blocking wait before it re-progresses the
+// worker. Overridable via COMMUX_WAIT_POLL_MS for tuning latency vs. wakeup
+// rate.
+int wait_poll_ms() {
+  static const int ms = [] {
+    const char* e = std::getenv("COMMUX_WAIT_POLL_MS");
+    int v = e ? std::atoi(e) : 1;
+    return v > 0 ? v : 1;
+  }();
+  return ms;
+}
+
+// Sleep until the worker's wakeup fd signals an event OR wait_poll_ms()
+// elapses, then return so the caller re-progresses. The timeout is the fix for
+// a LOST-WAKEUP deadlock: when several threads each block in the worker's
+// wakeup fd at once (e.g. a multi-threaded consumer like snapy's
+// BlockWorkerPool driving the single shared worker), one arriving event wakes
+// only ONE thread. That thread's ucp_worker_progress() completes the requests
+// of the OTHERS too, but they stay asleep on the now-consumed fd with no
+// further event to wake them -- so they never re-check reap()/the request
+// status and hang forever. (The same starvation also strands a peer when one
+// rank is in a collective and another is still in p2p.) An infinite
+// ucp_worker_wait() relies entirely on that one-shot event; bounding the sleep
+// means every parked thread re-progresses and observes its own completion
+// regardless of who consumed the event. poll() still returns immediately when
+// an event arrives, so latency is unchanged in the common case; the timeout
+// only caps idle sleep, keeping CPU near zero rather than busy-spinning
+// ucp_worker_progress().
+void worker_wait_timed(ucp_worker_h worker) {
+  ucs_status_t s = ucp_worker_arm(worker);
+  if (s == UCS_ERR_BUSY) return;  // events arrived during arm -> progress now
+  if (s != UCS_OK) {
+    std::this_thread::yield();  // wakeup unsupported: fall back to a yield
+    return;
+  }
+  int efd;
+  if (ucp_worker_get_efd(worker, &efd) != UCS_OK) {
+    std::this_thread::yield();
+    return;
+  }
+  struct pollfd pfd;
+  pfd.fd = efd;
+  pfd.events = POLLIN;
+  poll(&pfd, 1, wait_poll_ms());
 }
 
 // CUDA stream-sync is provided by the optional sibling libcommux_cuda.so -- the
@@ -229,9 +276,10 @@ class UCXWork : public c10d::Work {
     // deadlock, multi-threaded consumers such as snapy.)
     while (!reap()) {
       if (ucp_worker_progress(worker_)) continue;  // advanced; re-check
-      // Idle: sleep on the worker's wakeup fd until the next event, or yield if
-      // this UCX config exposes no wakeup fd.
-      if (ucp_worker_wait(worker_) != UCS_OK) std::this_thread::yield();
+      // Idle: sleep on the worker's wakeup fd, but only until the next event or
+      // a short timeout -- a bounded sleep so concurrently parked threads can't
+      // miss a lost wakeup on the shared worker (see worker_wait_timed).
+      worker_wait_timed(worker_);
     }
     if (err_) {
       std::rethrow_exception(err_);
@@ -450,11 +498,12 @@ void* ProcessGroupUCX::post_recv(at::Tensor& t, int src, uint32_t user_tag,
 void ProcessGroupUCX::wait_request(void* req) {
   if (req == nullptr) return;
   // Drive progress while events are ready; otherwise sleep on the worker's
-  // wakeup fd instead of busy-spinning. Caller holds worker_mu_.
+  // wakeup fd (bounded, to avoid the lost-wakeup deadlock -- see
+  // worker_wait_timed) instead of busy-spinning. Caller holds worker_mu_.
   ucs_status_t st;
   while ((st = ucp_request_check_status(req)) == UCS_INPROGRESS) {
     if (ucp_worker_progress(worker_)) continue;
-    if (ucp_worker_wait(worker_) != UCS_OK) std::this_thread::yield();
+    worker_wait_timed(worker_);
   }
   ucp_request_free(req);
   TORCH_CHECK(st == UCS_OK, "commux request failed: ", ucs_status_string(st));
