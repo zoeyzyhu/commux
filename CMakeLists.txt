@@ -197,12 +197,35 @@ if(COMMUX_BUILD_PYTHON)
   # <ucp/api/ucp.h> resolves -- whether UCX was bundled or taken from UCX_ROOT.
   install(DIRECTORY "${UCX_LIBRARY_DIR}/" DESTINATION commux/lib
           FILES_MATCHING PATTERN "libuc*.so*" PATTERN "libgdrapi*.so*")
-  foreach(_ucx_hdr ucp ucs uct ucm)
-    if(EXISTS "${UCX_INCLUDE_DIR}/${_ucx_hdr}")
-      install(DIRECTORY "${UCX_INCLUDE_DIR}/${_ucx_hdr}"
-              DESTINATION commux/include FILES_MATCHING PATTERN "*.h")
+
+  # UCX C headers -- stage at INSTALL time, not configure time. With bundled UCX
+  # the headers are produced by an ExternalProject during the build, so they do
+  # NOT exist when CMake configures; a configure-time `if(EXISTS)` guard here
+  # therefore evaluated false and silently dropped the install rule, shipping a
+  # wheel with the UCX libs but NO UCX headers -- unusable by a C++ consumer,
+  # since <commux/process_group_ucx.hpp> #includes <ucp/api/ucp.h> and exposes
+  # ucp_* types. Running as install(CODE) defers the copy (and the EXISTS check)
+  # to `cmake --install`, when the headers exist. Each subtree is copied by name
+  # (not the whole include root) so a system UCX in a shared prefix like
+  # /usr/include does not drag in unrelated headers. Fail loudly if ucp/api/ucp.h
+  # still did not make it in, so a headerless wheel is never produced.
+  install(CODE "
+    foreach(_ucx_hdr ucp ucs uct ucm)
+      if(EXISTS \"${UCX_INCLUDE_DIR}/\${_ucx_hdr}\")
+        file(INSTALL DESTINATION \"\${CMAKE_INSTALL_PREFIX}/commux/include\"
+             TYPE DIRECTORY FILES \"${UCX_INCLUDE_DIR}/\${_ucx_hdr}\"
+             FILES_MATCHING PATTERN \"*.h\")
+      endif()
+    endforeach()
+    if(NOT EXISTS \"\${CMAKE_INSTALL_PREFIX}/commux/include/ucp/api/ucp.h\")
+      message(FATAL_ERROR
+        \"commux packaging: UCX headers (ucp/api/ucp.h) were not staged into the \"
+        \"wheel from UCX_INCLUDE_DIR='${UCX_INCLUDE_DIR}'. The wheel would be \"
+        \"unusable by C++ consumers of <commux/process_group_ucx.hpp>. Build with \"
+        \"bundled UCX (the default when no system UCX is found) or point UCX_ROOT \"
+        \"at a full UCX install that ships headers.\")
     endif()
-  endforeach()
+  ")
 
   # Relocatability: the vendored UCX libs bake in an absolute build-tree rpath
   # that dangles once the wheel is installed elsewhere. Repoint each vendored
