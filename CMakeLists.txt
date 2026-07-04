@@ -118,6 +118,21 @@ if(_ucx_bundled)
   add_dependencies(commux commux_ucx_ext)
 endif()
 
+add_library(commux_io SHARED src/io.cpp)
+add_library(commux::io ALIAS commux_io)
+set_target_properties(commux_io PROPERTIES
+  POSITION_INDEPENDENT_CODE ON
+  BUILD_RPATH "$<TARGET_FILE_DIR:commux>;${UCX_LIBRARY_DIR}"
+  INSTALL_RPATH "$ORIGIN:${UCX_LIBRARY_DIR}")
+target_include_directories(commux_io PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+  "$<INSTALL_INTERFACE:include>")
+target_include_directories(commux_io SYSTEM PUBLIC ${TORCH_INCLUDE_DIRS})
+target_link_libraries(commux_io PUBLIC commux ${TORCH_LIBRARIES})
+if(_ucx_bundled)
+  add_dependencies(commux_io commux_ucx_ext)
+endif()
+
 # ---------------------------------------------------------------------------
 # CUDA stream-sync shim (libcommux_cuda.so): the ONLY commux object that links
 # libc10_cuda.so. Kept OUT of libcommux.so so the main library has no link-time
@@ -185,6 +200,7 @@ if(COMMUX_BUILD_PYTHON)
   #   commux/include/{ucp,ucs,uct,ucm}/*.h   vendored UCX headers
   install(TARGETS commux_pybind LIBRARY DESTINATION commux)
   install(TARGETS commux LIBRARY DESTINATION commux/lib)
+  install(TARGETS commux_io LIBRARY DESTINATION commux/lib)
   # The CUDA stream-sync shim ships next to libcommux.so (dlopen'd at runtime).
   if(_commux_cuda)
     install(TARGETS commux_cuda LIBRARY DESTINATION commux/lib)
