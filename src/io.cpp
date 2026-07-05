@@ -1,15 +1,15 @@
 #include "commux/io.hpp"
 
-#include <torch/torch.h>
-#include <torch/csrc/distributed/c10d/TCPStore.hpp>
-
-#include <cstring>
-#include <cerrno>
 #include <fcntl.h>
+#include <sys/types.h>
+#include <torch/torch.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <cstring>
 #include <stdexcept>
 #include <string>
-#include <sys/types.h>
-#include <unistd.h>
+#include <torch/csrc/distributed/c10d/TCPStore.hpp>
 
 #include "commux/process_group_ucx.hpp"
 
@@ -36,9 +36,7 @@ at::Tensor i64_tensor(std::int64_t value) {
   return torch::tensor({value}, torch::TensorOptions().dtype(torch::kInt64));
 }
 
-std::int64_t tensor_i64(const at::Tensor& t) {
-  return t.item<std::int64_t>();
-}
+std::int64_t tensor_i64(const at::Tensor& t) { return t.item<std::int64_t>(); }
 
 }  // namespace
 
@@ -99,8 +97,9 @@ void IOContext::write_at(int fd, const void* data, std::size_t nbytes,
     ssize_t n = ::pwrite(fd, ptr + done, nbytes - done,
                          static_cast<off_t>(offset + done));
     if (n < 0)
-      throw std::runtime_error(std::string("commux::IOContext write_at failed: ") +
-                               std::strerror(errno));
+      throw std::runtime_error(
+          std::string("commux::IOContext write_at failed: ") +
+          std::strerror(errno));
     if (n == 0)
       throw std::runtime_error("commux::IOContext write_at made no progress");
     done += static_cast<std::size_t>(n);
@@ -120,7 +119,8 @@ void IOContext::sync_file(int fd) {
 
 void IOContext::broadcast_bytes(std::vector<std::uint8_t>& bytes, int root) {
   if (root < 0 || root >= size_)
-    throw std::invalid_argument("commux::IOContext broadcast root out of range");
+    throw std::invalid_argument(
+        "commux::IOContext broadcast root out of range");
 
   std::int64_t nbytes = static_cast<std::int64_t>(bytes.size());
   if (rank_ == root) {
