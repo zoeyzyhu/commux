@@ -4,7 +4,12 @@
 #include <torch/csrc/distributed/c10d/TCPStore.hpp>
 
 #include <cstring>
+#include <cerrno>
+#include <fcntl.h>
 #include <stdexcept>
+#include <string>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include "commux/process_group_ucx.hpp"
 
@@ -56,6 +61,61 @@ void IOContext::recv_bytes(void* data, std::size_t nbytes, int src, int tag) {
   std::vector<at::Tensor> tensors{t};
   pg_->recv(tensors, src, tag)->wait();
   if (nbytes != 0) std::memcpy(data, t.data_ptr(), nbytes);
+}
+
+int IOContext::open_file(const std::string& path, int flags, int mode) {
+  int fd = ::open(path.c_str(), flags, static_cast<mode_t>(mode));
+  int local = fd >= 0 ? 0 : errno;
+  auto status = i64_tensor(local == 0 ? 0 : 1);
+  std::vector<at::Tensor> tensors{status};
+  c10d::AllreduceOptions opts;
+  opts.reduceOp = c10d::ReduceOp::SUM;
+  pg_->allreduce(tensors, opts)->wait();
+  if (tensor_i64(status) != 0) {
+    if (fd >= 0) ::close(fd);
+    throw std::runtime_error("commux::IOContext open_file failed");
+  }
+  return fd;
+}
+
+void IOContext::close_file(int fd) {
+  int local = ::close(fd) == 0 ? 0 : errno;
+  auto status = i64_tensor(local == 0 ? 0 : 1);
+  std::vector<at::Tensor> tensors{status};
+  c10d::AllreduceOptions opts;
+  opts.reduceOp = c10d::ReduceOp::SUM;
+  pg_->allreduce(tensors, opts)->wait();
+  if (tensor_i64(status) != 0)
+    throw std::runtime_error("commux::IOContext close_file failed");
+}
+
+void IOContext::write_at(int fd, const void* data, std::size_t nbytes,
+                         std::int64_t offset) {
+  if (offset < 0)
+    throw std::invalid_argument("commux::IOContext write_at negative offset");
+  const char* ptr = static_cast<const char*>(data);
+  std::size_t done = 0;
+  while (done < nbytes) {
+    ssize_t n = ::pwrite(fd, ptr + done, nbytes - done,
+                         static_cast<off_t>(offset + done));
+    if (n < 0)
+      throw std::runtime_error(std::string("commux::IOContext write_at failed: ") +
+                               std::strerror(errno));
+    if (n == 0)
+      throw std::runtime_error("commux::IOContext write_at made no progress");
+    done += static_cast<std::size_t>(n);
+  }
+}
+
+void IOContext::sync_file(int fd) {
+  int local = ::fsync(fd) == 0 ? 0 : errno;
+  auto status = i64_tensor(local == 0 ? 0 : 1);
+  std::vector<at::Tensor> tensors{status};
+  c10d::AllreduceOptions opts;
+  opts.reduceOp = c10d::ReduceOp::SUM;
+  pg_->allreduce(tensors, opts)->wait();
+  if (tensor_i64(status) != 0)
+    throw std::runtime_error("commux::IOContext sync_file failed");
 }
 
 void IOContext::broadcast_bytes(std::vector<std::uint8_t>& bytes, int root) {

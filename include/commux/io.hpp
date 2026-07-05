@@ -25,6 +25,11 @@ class IOContext {
                                          int root);
   void send_bytes(const void* data, std::size_t nbytes, int dst, int tag);
   void recv_bytes(void* data, std::size_t nbytes, int src, int tag);
+  int open_file(const std::string& path, int flags, int mode);
+  void close_file(int fd);
+  void write_at(int fd, const void* data, std::size_t nbytes,
+                std::int64_t offset);
+  void sync_file(int fd);
 
  private:
   int rank_;
