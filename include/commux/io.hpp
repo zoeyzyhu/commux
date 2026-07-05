@@ -1,12 +1,12 @@
 #pragma once
 
+#include <c10/util/intrusive_ptr.h>
+
 #include <cstdint>
 #include <memory>
 #include <string>
-#include <vector>
-
-#include <c10/util/intrusive_ptr.h>
 #include <torch/csrc/distributed/c10d/Store.hpp>
+#include <vector>
 
 namespace commux {
 
