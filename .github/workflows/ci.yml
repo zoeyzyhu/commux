@@ -94,7 +94,7 @@ jobs:
             -C cmake.define.COMMUX_UCX_PROVIDER=system \
             -C cmake.define.COMMUX_CUDA=OFF .
 
-      - name: Smoke import + end-to-end backend tests (CPU, 2-4 ranks)
+      - name: Smoke import + end-to-end backend tests (CPU, 2-7 ranks)
         env:
           UCX_TLS: tcp,sm,self
         run: |
@@ -112,5 +112,6 @@ jobs:
           # parked on the shared worker must all wake). Both are 2-rank.
           export COMMUX_MT=1 COMMUX_DEADLOCK=1
           ./build/test_commux 1 2 127.0.0.1 29555 &
+          rank1=$!
           ./build/test_commux 0 2 127.0.0.1 29555
-          wait
+          wait "$rank1"  # a bare wait returns 0; this returns rank 1's status
