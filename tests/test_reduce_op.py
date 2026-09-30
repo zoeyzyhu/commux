@@ -8,7 +8,8 @@ If the op were checked only where data is combined, the ranks that just send
 would return, and in all_reduce they would then wait for a broadcast that never
 comes. A SUM all_reduce after the rejected calls checks that nothing was left
 in flight on their tags. Each rank counts its failures and they are agreed with
-a final all_reduce.
+a final all_reduce. At one rank no message is sent, and the op must still be
+rejected.
 """
 import sys
 
