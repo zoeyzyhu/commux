@@ -73,7 +73,6 @@ jobs:
           CIBW_ENVIRONMENT: >
             PIP_NO_CACHE_DIR=1
             PIP_DISABLE_PIP_VERSION_CHECK=1
-            COMMUX_UCX_PROVIDER=bundled
             COMMUX_CUDA=ON
           CIBW_BEFORE_BUILD: |
             export PATH="/opt/python/cp${{ env.PY_VERSION }}-cp${{ env.PY_VERSION }}/bin:$PATH"

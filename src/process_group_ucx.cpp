@@ -5,6 +5,7 @@
 #include <dlfcn.h>
 #include <poll.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
@@ -524,15 +525,40 @@ void ProcessGroupUCX::wait_request(void* req) {
   TORCH_CHECK(st == UCS_OK, "commux request failed: ", ucs_status_string(st));
 }
 
+at::Tensor ProcessGroupUCX::host_coll_staging(size_t nbytes) {
+  if (!host_coll_buf_.defined() ||
+      static_cast<size_t>(host_coll_buf_.numel()) < nbytes) {
+    size_t grow = host_coll_buf_.defined() ? 2 * host_coll_buf_.numel() : 0;
+    host_coll_buf_ = at::empty(
+        {static_cast<int64_t>(std::max({nbytes, grow, size_t(4096)}))},
+        at::TensorOptions().dtype(at::kByte));
+  }
+  return host_coll_buf_.narrow(0, 0, static_cast<int64_t>(nbytes));
+}
+
 void ProcessGroupUCX::coll_send(const at::Tensor& t, int dst,
                                 uint32_t user_tag) {
   sync_stream_if_cuda(t);
-  wait_request(post_send(t, dst, user_tag, /*sub=*/0, /*collective=*/true));
+  if (t.is_cuda()) {
+    wait_request(post_send(t, dst, user_tag, /*sub=*/0, /*collective=*/true));
+    return;
+  }
+  size_t nbytes = static_cast<size_t>(t.numel()) * t.element_size();
+  at::Tensor s = host_coll_staging(nbytes);
+  if (nbytes) std::memcpy(s.data_ptr(), t.data_ptr(), nbytes);
+  wait_request(post_send(s, dst, user_tag, /*sub=*/0, /*collective=*/true));
 }
 
 void ProcessGroupUCX::coll_recv(at::Tensor& t, int src, uint32_t user_tag) {
   sync_stream_if_cuda(t);
-  wait_request(post_recv(t, src, user_tag, /*sub=*/0, /*collective=*/true));
+  if (t.is_cuda()) {
+    wait_request(post_recv(t, src, user_tag, /*sub=*/0, /*collective=*/true));
+    return;
+  }
+  size_t nbytes = static_cast<size_t>(t.numel()) * t.element_size();
+  at::Tensor s = host_coll_staging(nbytes);
+  wait_request(post_recv(s, src, user_tag, /*sub=*/0, /*collective=*/true));
+  if (nbytes) std::memcpy(t.data_ptr(), s.data_ptr(), nbytes);
 }
 
 // -------------------------------------------------------------------------
