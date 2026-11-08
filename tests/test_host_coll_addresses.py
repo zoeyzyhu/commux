@@ -8,7 +8,8 @@ Run:
 Builds tests/ucp_send_addr_shim.c against commux's bundled UCX headers, re-runs
 itself with it preloaded, then does 100 all_reduces and 20 barriers on fresh CPU
 tensors (the previous ones kept alive, so every input has a new address) and
-checks the sums and that commux posted host sends from at most 4 addresses.
+checks the sums, that at least 100 host sends were counted, and that commux
+posted them from at most 4 addresses.
 """
 import ctypes, os, subprocess, sys, tempfile
 
@@ -46,10 +47,10 @@ for _ in range(20):
     dist.barrier()
 addrs, sends = lib.shim_distinct_host_send_addrs(), lib.shim_host_sends()
 print(f"rank {rank}: {sends} host sends from {addrs} distinct addresses, {bad} wrong sums", flush=True)
-ok = torch.tensor([int(bad == 0 and addrs <= 4)], dtype=torch.int32)
+ok = torch.tensor([int(bad == 0 and sends >= 100 and addrs <= 4)], dtype=torch.int32)
 dist.all_reduce(ok, op=dist.ReduceOp.MIN)
 dist.destroy_process_group()
 if not ok.item():
-    print("FAIL: host collective sends must reuse a few fixed addresses", flush=True)
+    print("FAIL: need >= 100 counted host sends, from at most 4 addresses", flush=True)
     sys.exit(1)
 print("host collective send addresses PASSED", flush=True)

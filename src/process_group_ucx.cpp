@@ -545,7 +545,7 @@ void ProcessGroupUCX::coll_send(const at::Tensor& t, int dst,
   }
   size_t nbytes = static_cast<size_t>(t.numel()) * t.element_size();
   at::Tensor s = host_coll_staging(nbytes);
-  std::memcpy(s.data_ptr(), t.data_ptr(), nbytes);
+  if (nbytes) std::memcpy(s.data_ptr(), t.data_ptr(), nbytes);
   wait_request(post_send(s, dst, user_tag, /*sub=*/0, /*collective=*/true));
 }
 
@@ -558,7 +558,7 @@ void ProcessGroupUCX::coll_recv(at::Tensor& t, int src, uint32_t user_tag) {
   size_t nbytes = static_cast<size_t>(t.numel()) * t.element_size();
   at::Tensor s = host_coll_staging(nbytes);
   wait_request(post_recv(s, src, user_tag, /*sub=*/0, /*collective=*/true));
-  std::memcpy(t.data_ptr(), s.data_ptr(), nbytes);
+  if (nbytes) std::memcpy(t.data_ptr(), s.data_ptr(), nbytes);
 }
 
 // -------------------------------------------------------------------------
