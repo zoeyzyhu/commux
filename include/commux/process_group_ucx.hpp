@@ -94,6 +94,11 @@ class ProcessGroupUCX : public c10d::Backend {
   // Blocking variants used by the collective algorithms. Caller holds the lock.
   void coll_send(const at::Tensor& t, int dst, uint32_t user_tag);
   void coll_recv(at::Tensor& t, int src, uint32_t user_tag);
+  // Host collective payloads go through this one reused buffer, so UCX sees the
+  // same host address every call instead of each caller's (or clone's) fresh
+  // one: the xpmem rcache attaches every new remote address and never evicts.
+  at::Tensor host_coll_staging(size_t nbytes);
+  at::Tensor host_coll_buf_;
   void wait_request(void* req);  // drive progress until one request completes
 
   // Collective primitives that assume worker_mu_ is held.
